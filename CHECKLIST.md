@@ -2,7 +2,7 @@
 - [x] F1 span/utilidades + `make test` verde
 - [x] F2 colector imprime árbol con datos fabricados
 - [x] F3 api e inventario propagan trace_id/parent
-- [ ] F4 launcher: 6 trazas / 11 spans, exit 0
+- [x] F4 launcher: 6 trazas / 11 spans, exit 0
 - [ ] F5 sin zombies, pstree, kill -9, time, valgrind
 - [ ] F6 README, diagrama, capturas, matriz revisada
 

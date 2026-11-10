@@ -25,8 +25,6 @@ int main(int argc, char *argv[]) {
     int pout_r = atoi(argv[3]);
     int psp_w  = atoi(argv[4]);
 
-    srand((unsigned int)((int)getpid() ^ (int)time(NULL)));
-
     req_t req;
     int r;
     while ((r = leer_exacto(preq_r, &req, sizeof(req_t))) == 1) {

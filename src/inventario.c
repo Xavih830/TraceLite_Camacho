@@ -23,8 +23,6 @@ int main(int argc, char *argv[]) {
     int pout_w = atoi(argv[2]);
     int psp_w  = atoi(argv[3]);
 
-    srand((unsigned int)((int)getpid() ^ (int)time(NULL)));
-
     /* Stock inicial según sección 3.3: productos 0-3 con 10, producto 4 con 5 */
     int stock[5] = {10, 10, 10, 10, 5};
 
