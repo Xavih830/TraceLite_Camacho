@@ -53,3 +53,35 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Project build & output directories
+bin/
+build/
+
+# Internal docs & personal notes (excluded from repository)
+docs/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Sensitive files & credentials
+.env
+.env.*
+*.pem
+*.key
+*.crt
+secrets/
+
+# Crash dumps & profiling
+core
+core.*
+vgcore.*
+perf.data*
+
