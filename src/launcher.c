@@ -74,9 +74,7 @@ static pid_t lanzar(const char *ruta_bin, const int *conservar, int n_conservar,
     return pid;
 }
 
-int main(int argc, char *argv[]) {
-    int modo_lento = (argc > 1 && strcmp(argv[1], "--lento") == 0);
-
+int main(void) {
     int preq[2], pin[2], pout[2], psp[2];
     if (pipe(preq) < 0 || pipe(pin) < 0 || pipe(pout) < 0 || pipe(psp) < 0) {
         perror("pipe");
@@ -127,9 +125,6 @@ int main(int argc, char *argv[]) {
         if (escribir_exacto(preq[1], &peticiones[i], sizeof(req_t)) != 1) {
             fprintf(stderr, "[launcher] error al escribir petición %d\n", peticiones[i].id);
             break;
-        }
-        if (modo_lento) {
-            dormir_ms(600);
         }
     }
 
