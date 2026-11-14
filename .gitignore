@@ -63,9 +63,6 @@ opcion3_procesos_vivos/collector_sock
 opcion3_procesos_vivos/monitor_pid
 opcion3_procesos_vivos/orquestador_pids
 
-# Internal docs & personal notes (excluded from repository)
-docs/
-
 # OS & Editor files
 .DS_Store
 Thumbs.db
