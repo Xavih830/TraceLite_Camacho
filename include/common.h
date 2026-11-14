@@ -8,7 +8,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "span.h"
-#include "protocolo.h"
 
 int64_t ahora_ns(void);
 void    dormir_ms(int ms);

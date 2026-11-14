@@ -57,6 +57,11 @@ dkms.conf
 # Project build & output directories
 bin/
 build/
+opcion2_comandos/collector_sock
+opcion2_comandos/wrapper_traza
+opcion3_procesos_vivos/collector_sock
+opcion3_procesos_vivos/monitor_pid
+opcion3_procesos_vivos/orquestador_pids
 
 # Internal docs & personal notes (excluded from repository)
 docs/
