@@ -166,3 +166,51 @@ Este archivo registra cronológicamente cada cambio implementado en el proyecto.
 ### Qué se implementó
 - Se eliminó `docs/` de `.gitignore` para permitir que el historial (`docs/Updates.md`) y el plan (`docs/PLAN_MVP_TRACELITE.md`) formen parte del repositorio remoto.
 - De este modo, al clonar el proyecto en Lubuntu, el entorno y Antigravity en Linux contarán con todo el contexto de lo implementado y las pruebas pendientes (observación de árboles de procesos reales como Chrome o Antigravity vía Opción 3).
+
+---
+
+## [2026-11-14] Opción 3: Modo en tiempo real (`--watch` / `--stream`) con lectura de `/proc/<pid>/cmdline`
+
+### Qué se implementó
+- Se actualizó `opcion3_procesos_vivos/collector_sock.c`:
+  - Se agregó el flag `--stream` para imprimir en terminal cada `span_t` en tiempo real conforme llega por el Socket UNIX (`fflush(stdout)`), mostrando hora (`HH:MM:SS.mmm`), tipo de evento (`INICIO`, `NUEVO`, `CPU`, `FIN`), PID, proceso, detalle, duración y comando.
+  - Se ignoró `SIGINT` en modo `--stream` para que `orquestador_pids` coordine el cierre limpio enviando `__FIN__` y mostrando el resumen final de eventos recibidos.
+- Se actualizó `opcion3_procesos_vivos/orquestador_pids.c`:
+  - Se añadieron las opciones de línea de comandos `--watch` (`-w`), `--interval <ms>` (por defecto `150 ms`) y `--cycles <n>` manteniendo intacto el modo snapshot original.
+  - Se implementó `leer_cmdline_proc()` para leer `/proc/<pid>/cmdline` y capturar el comando completo con argumentos de cada proceso observado.
+  - Se ampliaron los límites de observación (`MAX_PROCS_SO = 2048`, `MAX_NODOS = 32`, `MAX_WATCH = 256`) y se añadió manejo de señales (`SIGINT`/`SIGTERM`) para detener el monitoreo limpiamente con `Ctrl+C`.
+  - Se implementó `ejecutar_modo_watch()` para detectar y emitir eventos en vivo cuando aparecen nuevos subprocesos (`NUEVO`), cuando consumen CPU (`CPU +N ticks`) y cuando terminan (`FIN` con su duración).
+- Se compiló con `make clean && make && make test` sin advertencias y se verificó en Lubuntu observando en vivo el árbol de `antigravity-ide` (`./orquestador_pids 1937 --watch --interval 150 --cycles 10`).
+
+---
+
+## [2026-11-14] Opción 3: Alineación del modo `--watch` (`--stream`) con las columnas completas de trazabilidad
+
+### Qué se implementó
+- Se actualizó `imprimir_span_stream()` en `opcion3_procesos_vivos/collector_sock.c` para que el modo en tiempo real (`--stream`) imprima exactamente las mismas columnas requeridas que el modo normal:
+  - Encabezado con `TRACE ID`, `Start` y `Modo: WATCH (tiempo real)`.
+  - Columnas `INICIO`, `FIN`, `SPAN_ID`, `PARENT_ID`, `SERVICIO`, `OPERACION`, `DURACION`, `CASCADA`, `PID` y `ESTADO` (acompañado del badge de evento `[INICIO]`/`[NUEVO]`/`[CPU]`/`[FIN]` y el comando leído de `/proc/<pid>/cmdline`).
+  - Cálculo progresivo de la barra `CASCADA` respecto al inicio del stream y vaciado inmediato de búfer (`fflush(stdout)`).
+- Se recompiló con `make && make test` sin advertencias y se verificó con `./orquestador_pids 1937 --watch --interval 150 --cycles 8` (`36 eventos recibidos`).
+
+---
+
+## [2026-11-14] Opción 3: Modo `--resumen` (`--duracion`) para consolidar trazas largas en una tabla jerárquica única
+
+### Qué se implementó
+- Se actualizó `opcion3_procesos_vivos/orquestador_pids.c`:
+  - Se añadieron los flags `--resumen` (`-r`) y `--duracion <seg>` (`-d <seg>`), manteniendo intactos el modo snapshot original y el modo `--watch`.
+  - Se implementó `ejecutar_modo_resumen()`, que monitorea el subárbol del PID raíz en silencio durante la ventana configurada (o hasta `Ctrl+C` / finalización del PID raíz), consolida 1 único registro por cada proceso (`resumen_proc_t`, hasta `MAX_RESUMEN = 512`), acumula sus ticks totales de CPU (`ticks_ult - ticks_ini`), su tiempo real de inicio y fin, su relación padre-hijo y su comando en `/proc/<pid>/cmdline`.
+  - Al finalizar la captura, envía los spans consolidados al `collector_sock` normal para imprimir una única tabla jerárquica en árbol sin saturar la terminal.
+- Se compiló con `make && make test` sin advertencias y se verificó con:
+  - Carga mixta `bash` + `sleep 0.2` + `python3` (`1 trazas, 4 spans`, `python3` con `ticks:+41 (fin)` y `510.52 ms`).
+  - `antigravity-ide` (`./orquestador_pids 1937 --resumen --duracion 2 --interval 150`): `1 trazas, 21 spans` consolidados con ticks acumulados por proceso.
+
+---
+
+## [2026-11-14] Opción 3: Corrección de `Ctrl+C` (`SIGINT`) en `--resumen` para que `collector_sock` imprima la tabla
+
+### Qué se implementó
+- Se corrigió `opcion3_procesos_vivos/orquestador_pids.c`: al hacer `fork()` para lanzar `collector_sock` en `ejecutar_modo_resumen()` (y en modo snapshot), el proceso hijo ahora ejecuta `signal(SIGINT, SIG_IGN)` antes de `execv()`.
+- Con esto, cuando el usuario presiona `Ctrl+C` en la terminal, el kernel no mata prematuramente a `collector_sock` junto con el grupo de procesos en primer plano: `orquestador_pids` captura `SIGINT`, envía todos los spans consolidados y `__FIN__`, y `collector_sock` imprime la tabla completa antes de salir.
+- Se recompiló con `make && make test` y se verificó enviando `SIGINT` (`kill -INT`) tras 1 s de captura sobre `antigravity-ide` (`PID 1937`), imprimiendo correctamente `1 trazas, 23 spans`.

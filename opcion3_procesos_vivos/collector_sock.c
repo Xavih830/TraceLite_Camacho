@@ -1,6 +1,7 @@
 #include "common.h"
 
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,10 @@ static span_t *spans = NULL;
 static int n_spans = 0;
 static int cap_spans = 0;
 static int terminar = 0;
+static int modo_stream = 0;
+static int stream_header_impreso = 0;
+static int64_t stream_ini_ns = 0;
+static int64_t delta_real_mono_global = 0;
 static int server_fd = -1;
 static pthread_mutex_t mutex_spans = PTHREAD_MUTEX_INITIALIZER;
 
@@ -199,6 +204,75 @@ static void imprimir_todas_las_trazas(void) {
     free(traza_vista);
 }
 
+static void imprimir_span_stream(const span_t *s) {
+    if (!stream_header_impreso) {
+        stream_header_impreso = 1;
+        stream_ini_ns = s->ini;
+
+        char inicio_traza[32];
+        formatear_fecha_ns(s->ini + delta_real_mono_global, inicio_traza, sizeof(inicio_traza), 1);
+
+        printf("\n%s%sTRACE ID: %s%s  %s| Start: %s | Modo: WATCH (tiempo real)%s\n",
+               C_BOLD, C_YELLOW, s->trace_id, C_RESET, C_DIM, inicio_traza, C_RESET);
+        printf("%s%-23s %-12s %-16s %-16s %-24s %-26s %9s  %-18s  %-5s %s%s\n",
+               C_BOLD,
+               "INICIO", "FIN", "SPAN_ID", "PARENT_ID", "SERVICIO", "OPERACION",
+               "DURACION", "CASCADA", "PID", "ESTADO", C_RESET);
+        printf("%s--------------------------------------------------------------------------------------------------------------------------------------------------------------------------%s\n",
+               C_DIM, C_RESET);
+    }
+
+    char ini_fecha[32];
+    char fin_hora[20];
+    formatear_fecha_ns(s->ini + delta_real_mono_global, ini_fecha, sizeof(ini_fecha), 1);
+    formatear_fecha_ns(s->fin + delta_real_mono_global, fin_hora, sizeof(fin_hora), 0);
+
+    const char *parent_str = (s->parent[0] != '\0') ? s->parent : "(raiz)";
+
+    double offset_ms = (double)(s->ini - stream_ini_ns) / 1000000.0;
+    if (offset_ms < 0.0) offset_ms = 0.0;
+    double total_ms = offset_ms + (s->dur > 0.0 ? s->dur : 1.0);
+    if (total_ms <= 0.0) total_ms = 1.0;
+
+    char dur_str[16];
+    snprintf(dur_str, sizeof(dur_str), "%.2f ms", s->dur);
+
+    char cascada[17];
+    construir_cascada(cascada, 16, offset_ms, s->dur > 0.0 ? s->dur : 1.0, total_ms);
+
+    const char *ev = (s->anomalia[0] != '\0') ? s->anomalia : "SPAN";
+    const char *color_ev = C_GREEN;
+    if (s->estado != 0) {
+        color_ev = C_RED;
+    } else if (strcmp(ev, "CPU") == 0) {
+        color_ev = C_YELLOW;
+    } else if (strcmp(ev, "FIN") == 0) {
+        color_ev = C_CYAN;
+    } else if (strcmp(ev, "INICIO") == 0) {
+        color_ev = C_DIM;
+    }
+    const char *color_bar = (s->estado == 0) ? C_CYAN : C_RED;
+    const char *est_txt   = (s->estado == 0) ? "OK" : "ERROR";
+
+    printf("%-23s %-12s %-16s %-16s %-24.24s %-26.26s %9s  %s[%s]%s  %-5d %s%s [%s]%s",
+           ini_fecha,
+           fin_hora,
+           s->span_id,
+           parent_str,
+           s->servicio,
+           s->operacion,
+           dur_str,
+           color_bar, cascada, C_RESET,
+           s->pid,
+           color_ev, est_txt, ev, C_RESET);
+
+    if (s->msg[0] != '\0') {
+        printf(" (%s)", s->msg);
+    }
+    printf("\n");
+    fflush(stdout);
+}
+
 static void *atender_cliente(void *arg) {
     int client_fd = *(int *)arg;
     free(arg);
@@ -215,16 +289,21 @@ static void *atender_cliente(void *arg) {
             break;
         }
 
-        if (n_spans >= cap_spans) {
-            int nueva_cap = (cap_spans == 0) ? 16 : cap_spans * 2;
-            span_t *nuevo = (span_t *)realloc(spans, (size_t)nueva_cap * sizeof(span_t));
-            if (nuevo != NULL) {
-                spans = nuevo;
-                cap_spans = nueva_cap;
+        if (modo_stream) {
+            imprimir_span_stream(&temp);
+            n_spans++;
+        } else {
+            if (n_spans >= cap_spans) {
+                int nueva_cap = (cap_spans == 0) ? 16 : cap_spans * 2;
+                span_t *nuevo = (span_t *)realloc(spans, (size_t)nueva_cap * sizeof(span_t));
+                if (nuevo != NULL) {
+                    spans = nuevo;
+                    cap_spans = nueva_cap;
+                }
             }
-        }
-        if (n_spans < cap_spans) {
-            spans[n_spans++] = temp;
+            if (n_spans < cap_spans) {
+                spans[n_spans++] = temp;
+            }
         }
         pthread_mutex_unlock(&mutex_spans);
     }
@@ -234,7 +313,24 @@ static void *atender_cliente(void *arg) {
 }
 
 int main(int argc, char *argv[]) {
-    const char *sock_path = (argc > 1) ? argv[1] : "/tmp/tracelite_op3.sock";
+    const char *sock_path = "/tmp/tracelite_op3.sock";
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--stream") == 0) {
+            modo_stream = 1;
+        } else {
+            sock_path = argv[i];
+        }
+    }
+
+    if (modo_stream) {
+        signal(SIGINT, SIG_IGN);
+        struct timespec ts_real, ts_mono;
+        clock_gettime(CLOCK_REALTIME, &ts_real);
+        clock_gettime(CLOCK_MONOTONIC, &ts_mono);
+        int64_t real_ns = (int64_t)ts_real.tv_sec * 1000000000LL + (int64_t)ts_real.tv_nsec;
+        int64_t mono_ns = (int64_t)ts_mono.tv_sec * 1000000000LL + (int64_t)ts_mono.tv_nsec;
+        delta_real_mono_global = real_ns - mono_ns;
+    }
 
     unlink(sock_path);
 
@@ -311,7 +407,12 @@ int main(int argc, char *argv[]) {
         pthread_join(hilos[i], NULL);
     }
 
-    imprimir_todas_las_trazas();
+    if (modo_stream) {
+        printf("\n%s-- Watch finalizado: %d eventos recibidos --%s\n", C_BOLD, n_spans, C_RESET);
+        fflush(stdout);
+    } else {
+        imprimir_todas_las_trazas();
+    }
 
     free(hilos);
     free(spans);
