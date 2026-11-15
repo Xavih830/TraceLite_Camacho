@@ -15,7 +15,6 @@
 
 #define MAX_PROCS_SO 2048
 #define MAX_NODOS    32
-#define MAX_WATCH    256
 #define MAX_RESUMEN  512
 
 typedef struct {
@@ -41,23 +40,11 @@ typedef struct {
     int           visto_ahora;
 } resumen_proc_t;
 
-typedef struct {
-    int           pid;
-    int           ppid;
-    char          comm[32];
-    char          cmdline[64];
-    char          span_id[17];
-    char          parent_span_id[17];
-    unsigned long ticks;
-    int64_t       ini_ns;
-    int           visto_ahora;
-} watch_proc_t;
+static volatile sig_atomic_t detener_captura = 0;
 
-static volatile sig_atomic_t detener_watch = 0;
-
-static void manejar_senal_watch(int sig) {
+static void manejar_senal(int sig) {
     (void)sig;
-    detener_watch = 1;
+    detener_captura = 1;
 }
 
 typedef struct {
@@ -235,9 +222,7 @@ static void imprimir_ayuda(const char *prog) {
     printf("Opciones:\n");
     printf("  -r, --resumen          Captura continua (60 s por defecto) con tabla consolidada\n");
     printf("  -d, --duracion <seg>   Duracion en segundos para --resumen (0 = manual con Ctrl+C)\n");
-    printf("  -w, --watch            Muestra eventos en vivo conforme cambian los procesos\n");
     printf("  --interval <ms>        Intervalo de muestreo en ms (por defecto 150)\n");
-    printf("  --cycles <n>           Maximo de ciclos para --watch\n");
     printf("  -h, --help             Muestra esta ayuda y ejemplos\n\n");
     printf("Ejemplos intuitivos por nombre:\n");
     printf("  %s antigravity\n", prog);
@@ -319,9 +304,9 @@ static int conectar_colector(const char *sock_path) {
     return -1;
 }
 
-static void recolectar_subarbol_watch(const proc_info_t *lista, int n_procs,
-                                      int pid_actual, const proc_info_t **out_procs,
-                                      int *n_out, int max_out, int profundidad) {
+static void recolectar_subarbol_proc(const proc_info_t *lista, int n_procs,
+                                     int pid_actual, const proc_info_t **out_procs,
+                                     int *n_out, int max_out, int profundidad) {
     if (*n_out >= max_out || profundidad > 10) return;
 
     const proc_info_t *actual = NULL;
@@ -337,185 +322,17 @@ static void recolectar_subarbol_watch(const proc_info_t *lista, int n_procs,
 
     for (int i = 0; i < n_procs && *n_out < max_out; i++) {
         if (lista[i].ppid == pid_actual) {
-            recolectar_subarbol_watch(lista, n_procs, lista[i].pid,
-                                      out_procs, n_out, max_out, profundidad + 1);
+            recolectar_subarbol_proc(lista, n_procs, lista[i].pid,
+                                     out_procs, n_out, max_out, profundidad + 1);
         }
     }
-}
-
-static void enviar_evento_watch(int sock_fd, const char *trace_id,
-                                const char *span_id, const char *parent_id,
-                                const char *servicio, const char *operacion,
-                                const char *evento, const char *cmdline,
-                                int pid, double dur_ms) {
-    span_t s;
-    span_ini(&s, trace_id, parent_id, servicio, operacion);
-    if (span_id != NULL && span_id[0] != '\0') {
-        snprintf(s.span_id, sizeof(s.span_id), "%s", span_id);
-    }
-    s.pid = pid;
-    span_fin(&s, 0, cmdline, evento);
-    if (dur_ms >= 0.0) {
-        s.dur = dur_ms;
-    }
-    escribir_exacto(sock_fd, &s, sizeof(span_t));
-}
-
-static int ejecutar_modo_watch(int pid_raiz, const char *sock_path,
-                               int interval_ms, int max_ciclos) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = manejar_senal_watch;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-
-    fflush(stdout);
-    pid_t pid_col = fork();
-    if (pid_col < 0) {
-        perror("fork collector");
-        return 1;
-    }
-    if (pid_col == 0) {
-        char *args_col[4] = { "./bin/collector", (char *)sock_path, "--stream", NULL };
-        execv("./bin/collector", args_col);
-        perror("execv collector_sock");
-        _exit(127);
-    }
-
-    int sock_fd = conectar_colector(sock_path);
-    if (sock_fd < 0) {
-        fprintf(stderr, "[tracelite] No se pudo conectar con collector_sock.\n");
-        waitpid(pid_col, NULL, 0);
-        return 1;
-    }
-
-    char trace_id[33];
-    id_hex(trace_id, 16);
-
-    printf("[tracelite] Modo --watch activo sobre PID %d (intervalo %d ms). Ctrl+C para detener.\n",
-           pid_raiz, interval_ms);
-    fflush(stdout);
-
-    proc_info_t *lista = (proc_info_t *)malloc(sizeof(proc_info_t) * MAX_PROCS_SO);
-    watch_proc_t *activos = (watch_proc_t *)calloc(MAX_WATCH, sizeof(watch_proc_t));
-    const proc_info_t **subarbol = (const proc_info_t **)malloc(sizeof(proc_info_t *) * MAX_WATCH);
-    if (lista == NULL || activos == NULL || subarbol == NULL) {
-        free(lista);
-        free(activos);
-        free(subarbol);
-        close(sock_fd);
-        waitpid(pid_col, NULL, 0);
-        return 1;
-    }
-
-    int n_activos = 0;
-    int ciclo = 0;
-
-    while (!detener_watch && (max_ciclos <= 0 || ciclo < max_ciclos)) {
-        int n_procs = cargar_procesos_so(lista, MAX_PROCS_SO, (int)getpid());
-        int n_sub = 0;
-        recolectar_subarbol_watch(lista, n_procs, pid_raiz, subarbol, &n_sub, MAX_WATCH, 0);
-
-        for (int i = 0; i < n_activos; i++) {
-            activos[i].visto_ahora = 0;
-        }
-
-        for (int i = 0; i < n_sub; i++) {
-            const proc_info_t *p = subarbol[i];
-            int idx = -1;
-            for (int j = 0; j < n_activos; j++) {
-                if (activos[j].pid == p->pid) {
-                    idx = j;
-                    break;
-                }
-            }
-
-            char cmdline[64];
-            leer_cmdline_proc(p->pid, p->comm, cmdline, sizeof(cmdline));
-
-            if (idx >= 0) {
-                activos[idx].visto_ahora = 1;
-                if (p->ticks > activos[idx].ticks) {
-                    unsigned long delta = p->ticks - activos[idx].ticks;
-                    char op[48];
-                    snprintf(op, sizeof(op), "+%lu ticks (%c)", delta, p->state);
-                    enviar_evento_watch(sock_fd, trace_id, activos[idx].span_id,
-                                        activos[idx].parent_span_id, p->comm,
-                                        op, "CPU", cmdline, p->pid, 0.0);
-                }
-                activos[idx].ticks = p->ticks;
-                snprintf(activos[idx].cmdline, sizeof(activos[idx].cmdline), "%s", cmdline);
-            } else if (n_activos < MAX_WATCH) {
-                watch_proc_t *w = &activos[n_activos++];
-                w->pid = p->pid;
-                w->ppid = p->ppid;
-                snprintf(w->comm, sizeof(w->comm), "%s", p->comm);
-                snprintf(w->cmdline, sizeof(w->cmdline), "%s", cmdline);
-                id_hex(w->span_id, 8);
-                snprintf(w->parent_span_id, sizeof(w->parent_span_id), "%s", "");
-                for (int k = 0; k < n_activos - 1; k++) {
-                    if (activos[k].pid == p->ppid) {
-                        snprintf(w->parent_span_id, sizeof(w->parent_span_id), "%s", activos[k].span_id);
-                        break;
-                    }
-                }
-                w->ticks = p->ticks;
-                w->ini_ns = ahora_ns();
-                w->visto_ahora = 1;
-
-                char op[48];
-                snprintf(op, sizeof(op), "ppid:%d (%c)", p->ppid, p->state);
-                enviar_evento_watch(sock_fd, trace_id, w->span_id, w->parent_span_id,
-                                    p->comm, op, (ciclo == 0) ? "INICIO" : "NUEVO",
-                                    cmdline, p->pid, 0.0);
-            }
-        }
-
-        /* Registro de procesos que terminaron */
-        int64_t t_now = ahora_ns();
-        for (int i = 0; i < n_activos; ) {
-            if (!activos[i].visto_ahora) {
-                double dur_ms = (double)(t_now - activos[i].ini_ns) / 1000000.0;
-                enviar_evento_watch(sock_fd, trace_id, activos[i].span_id,
-                                    activos[i].parent_span_id, activos[i].comm,
-                                    "finalizado", "FIN", activos[i].cmdline,
-                                    activos[i].pid, dur_ms);
-                activos[i] = activos[n_activos - 1];
-                n_activos--;
-            } else {
-                i++;
-            }
-        }
-
-        if (n_sub == 0) {
-            printf("[tracelite] PID raíz %d finalizó.\n", pid_raiz);
-            break;
-        }
-
-        ciclo++;
-        if (!detener_watch && (max_ciclos <= 0 || ciclo < max_ciclos)) {
-            dormir_ms(interval_ms);
-        }
-    }
-
-    span_t fin;
-    memset(&fin, 0, sizeof(fin));
-    snprintf(fin.servicio, sizeof(fin.servicio), "__FIN__");
-    escribir_exacto(sock_fd, &fin, sizeof(span_t));
-    close(sock_fd);
-
-    free(lista);
-    free(activos);
-    free(subarbol);
-    waitpid(pid_col, NULL, 0);
-    return 0;
 }
 
 static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
                                  int interval_ms, int duracion_seg) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = manejar_senal_watch;
+    sa.sa_handler = manejar_senal;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
@@ -561,10 +378,10 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
     int64_t limite_ns = (duracion_seg > 0) ? (int64_t)duracion_seg * 1000000000LL : 0;
     int ultimo_seg_mostrado = -1;
 
-    while (!detener_watch) {
+    while (!detener_captura) {
         int n_procs = cargar_procesos_so(lista, MAX_PROCS_SO, (int)getpid());
         int n_sub = 0;
-        recolectar_subarbol_watch(lista, n_procs, pid_raiz, subarbol, &n_sub, MAX_RESUMEN, 0);
+        recolectar_subarbol_proc(lista, n_procs, pid_raiz, subarbol, &n_sub, MAX_RESUMEN, 0);
 
         for (int i = 0; i < n_hist; i++) {
             hist[i].visto_ahora = 0;
@@ -675,10 +492,8 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
 
 int main(int argc, char *argv[]) {
     const char *sock_path = "/tmp/tracelite.sock";
-    int modo_watch = 0;
     int modo_resumen = 0;
     int interval_ms = 150;
-    int max_ciclos = 0;
     int duracion_seg = -1;
     int pid_arg = -1;
     const char *nombre_arg = NULL;
@@ -687,15 +502,11 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             imprimir_ayuda(argv[0]);
             return 0;
-        } else if (strcmp(argv[i], "--watch") == 0 || strcmp(argv[i], "-w") == 0) {
-            modo_watch = 1;
         } else if (strcmp(argv[i], "--resumen") == 0 || strcmp(argv[i], "-r") == 0) {
             modo_resumen = 1;
         } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
             interval_ms = atoi(argv[++i]);
             if (interval_ms < 50) interval_ms = 50;
-        } else if (strcmp(argv[i], "--cycles") == 0 && i + 1 < argc) {
-            max_ciclos = atoi(argv[++i]);
         } else if ((strcmp(argv[i], "--duracion") == 0 || strcmp(argv[i], "-d") == 0) && i + 1 < argc) {
             duracion_seg = atoi(argv[++i]);
         } else if (es_numerico(argv[i])) {
@@ -722,7 +533,7 @@ int main(int argc, char *argv[]) {
         pid_raiz = buscar_pid_por_nombre(lista, n_procs, nombre_arg);
         if (pid_raiz > 0) {
             printf("[tracelite] Proceso '%s' resuelto al PID raíz %d.\n", nombre_arg, pid_raiz);
-        } else if (modo_resumen || modo_watch) {
+        } else if (modo_resumen) {
             fprintf(stderr, "[tracelite] No se encontró ningún proceso activo para '%s'.\n", nombre_arg);
             free(lista);
             return 1;
@@ -743,10 +554,6 @@ int main(int argc, char *argv[]) {
             duracion_seg = 60;
         }
         return ejecutar_modo_resumen(pid_raiz, sock_path, interval_ms, duracion_seg);
-    }
-    if (modo_watch) {
-        free(lista);
-        return ejecutar_modo_watch(pid_raiz, sock_path, interval_ms, max_ciclos);
     }
 
     /* 1. Lanzar collector_sock con fork() + execv() */

@@ -281,3 +281,11 @@ Para detectar incrementos aleatorios o picos anómalos en el tiempo de ejecució
   - Se eliminó la etiqueta `ticks:+N (vivo|fin)` en la columna `OPERACION`, mostrando directamente el comando/operación real leído desde `/proc/<pid>/cmdline`.
 - **Refactorización de comentarios:**
   - Se simplificaron los comentarios en `include/*.h`, `src/*.c` y `tests/test_span.c` a guías breves de sección orientadas al programador.
+
+---
+
+## [2026-11-15] Eliminación del modo `--watch` (`--stream`)
+
+### Qué se implementó
+- Se eliminó el modo `--watch` (`--stream`) de `src/tracelite.c`, `src/collector.c` y `README.md` (`ejecutar_modo_watch`, `enviar_evento_watch`, `imprimir_span_stream`, flags `-w`/`--watch`/`--cycles`/`--stream`).
+- El proyecto queda enfocado en sus dos modos principales: modo instantánea (con `monitor_pid` en paralelo por cada nodo) y modo `--resumen` (consolidado jerárquico con detección de anomalías de tiempo).

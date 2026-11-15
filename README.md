@@ -70,12 +70,6 @@ Monitorea la aparición y finalización de subprocesos bajo un proceso o PID ra�
 ./bin/tracelite --resumen -d 20 chrome
 ```
 
-### Modo `--watch` (streaming en tiempo real)
-Envía eventos al colector en vivo conforme nacen o terminan subprocesos bajo el proceso observado:
-```bash
-./bin/tracelite --watch antigravity
-```
-
 ---
 
 ## 4. Arquitectura e IPC
