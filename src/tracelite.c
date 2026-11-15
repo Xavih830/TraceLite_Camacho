@@ -11,14 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/*
- * Opción 3 (con descubrimiento recursivo de jerarquía por PPID):
- * - Escanea /proc/<pid>/stat para obtener el árbol real (PID, PPID, comm).
- * - Parte de un PID raíz (pasado por argv[1], o autoseleccionado buscando un
- *   proceso vivo con subprocesos) y descubre recursivamente sus hijos y nietos.
- * - Lanza collector_sock y un agente monitor_pid por cada nodo del árbol
- *   mediante fork() + execv(), preservando la relación padre-hijo real.
- */
+/* Orquestador TraceLite: descubre jerarquías de procesos en /proc y lanza collector + monitores */
 
 #define MAX_PROCS_SO 2048
 #define MAX_NODOS    32
@@ -176,8 +169,87 @@ static int contar_hijos(const proc_info_t *lista, int n, int pid) {
     return c;
 }
 
+/* Búsqueda de subcadena sin distinguir mayúsculas/minúsculas */
+static int contiene_substr_ci(const char *haystack, const char *needle) {
+    if (needle == NULL || needle[0] == '\0') return 0;
+    size_t nlen = strlen(needle);
+    for (size_t i = 0; haystack[i] != '\0'; i++) {
+        size_t j = 0;
+        while (j < nlen && haystack[i + j] != '\0' &&
+               tolower((unsigned char)haystack[i + j]) == tolower((unsigned char)needle[j])) {
+            j++;
+        }
+        if (j == nlen) return 1;
+    }
+    return 0;
+}
+
+/* Busca el PID raíz cuyo comm o cmdline coincida con el nombre dado */
+static int buscar_pid_por_nombre(const proc_info_t *lista, int n, const char *nombre) {
+    int ppid_propio = (int)getppid();
+
+    for (int pasada = 0; pasada < 2; pasada++) {
+        int mejor_pid = -1;
+        int mejor_es_raiz = -1;
+        int mejor_hijos = -1;
+
+        for (int i = 0; i < n; i++) {
+            int coincide = 0;
+            if (pasada == 0) {
+                coincide = contiene_substr_ci(lista[i].comm, nombre);
+            } else {
+                if (lista[i].pid == ppid_propio) continue;
+                char cmd[128];
+                leer_cmdline_proc(lista[i].pid, lista[i].comm, cmd, sizeof(cmd));
+                coincide = contiene_substr_ci(cmd, nombre);
+            }
+            if (!coincide) continue;
+
+            int es_raiz = 1;
+            for (int k = 0; k < n; k++) {
+                if (lista[k].pid == lista[i].ppid &&
+                    contiene_substr_ci(lista[k].comm, nombre)) {
+                    es_raiz = 0;
+                    break;
+                }
+            }
+
+            int h = contar_hijos(lista, n, lista[i].pid);
+            if (es_raiz > mejor_es_raiz ||
+                (es_raiz == mejor_es_raiz && h > mejor_hijos)) {
+                mejor_es_raiz = es_raiz;
+                mejor_hijos = h;
+                mejor_pid = lista[i].pid;
+            }
+        }
+
+        if (mejor_pid > 0) {
+            return mejor_pid;
+        }
+    }
+    return -1;
+}
+
+static void imprimir_ayuda(const char *prog) {
+    printf("Uso: %s [PID | NOMBRE] [opciones]\n\n", prog);
+    printf("Opciones:\n");
+    printf("  -r, --resumen          Captura continua (60 s por defecto) con tabla consolidada\n");
+    printf("  -d, --duracion <seg>   Duracion en segundos para --resumen (0 = manual con Ctrl+C)\n");
+    printf("  -w, --watch            Muestra eventos en vivo conforme cambian los procesos\n");
+    printf("  --interval <ms>        Intervalo de muestreo en ms (por defecto 150)\n");
+    printf("  --cycles <n>           Maximo de ciclos para --watch\n");
+    printf("  -h, --help             Muestra esta ayuda y ejemplos\n\n");
+    printf("Ejemplos intuitivos por nombre:\n");
+    printf("  %s antigravity\n", prog);
+    printf("  %s --resumen -d 30 antigravity\n", prog);
+    printf("  %s --resumen -d 20 chrome\n", prog);
+    printf("  %s --resumen -d 20 firefox\n", prog);
+    printf("  %s postgres\n", prog);
+}
+
+/* Selección automática de PID raíz con mayor jerarquía de hijos */
 static int elegir_pid_raiz_automatico(const proc_info_t *lista, int n) {
-    /* Priorizar algún proceso que tenga hijos reales y no sea el kernel/PID 1 si hay otro mejor */
+    /* Prioriza un proceso con hijos reales distinto de PID 1/2 */
     int candidato = -1;
     int max_hijos = 0;
     for (int i = 0; i < n; i++) {
@@ -190,7 +262,7 @@ static int elegir_pid_raiz_automatico(const proc_info_t *lista, int n) {
     }
     if (candidato > 0) return candidato;
 
-    /* Si no hay otros con hijos, usar PID 2 o PID 1 si está accesible */
+    /* Respaldo: PID 1 o PID 2 si tienen hijos */
     for (int i = 0; i < n; i++) {
         if (contar_hijos(lista, n, lista[i].pid) > 0) {
             return lista[i].pid;
@@ -399,7 +471,7 @@ static int ejecutar_modo_watch(int pid_raiz, const char *sock_path,
             }
         }
 
-        /* Detectar procesos que terminaron */
+        /* Registro de procesos que terminaron */
         int64_t t_now = ahora_ns();
         for (int i = 0; i < n_activos; ) {
             if (!activos[i].visto_ahora) {
@@ -574,17 +646,13 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
 
         for (int i = 0; i < n_hist; i++) {
             span_t s;
-            unsigned long dticks = (hist[i].ticks_ult >= hist[i].ticks_ini)
-                                   ? (hist[i].ticks_ult - hist[i].ticks_ini)
-                                   : 0;
             char op[48];
-            snprintf(op, sizeof(op), "ticks:+%lu (%s)", dticks,
-                     hist[i].finalizado ? "fin" : "vivo");
+            snprintf(op, sizeof(op), "%.47s", hist[i].cmdline);
 
             span_ini(&s, raiz.trace_id, hist[i].parent_span_id, hist[i].comm, op);
             snprintf(s.span_id, sizeof(s.span_id), "%s", hist[i].span_id);
             s.pid = hist[i].pid;
-            span_fin(&s, 0, hist[i].cmdline, "");
+            span_fin(&s, 0, "", "");
             s.ini = hist[i].ini_ns;
             s.fin = hist[i].fin_ns;
             s.dur = (double)(hist[i].fin_ns - hist[i].ini_ns) / 1000000.0;
@@ -613,9 +681,13 @@ int main(int argc, char *argv[]) {
     int max_ciclos = 0;
     int duracion_seg = -1;
     int pid_arg = -1;
+    const char *nombre_arg = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--watch") == 0 || strcmp(argv[i], "-w") == 0) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            imprimir_ayuda(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "--watch") == 0 || strcmp(argv[i], "-w") == 0) {
             modo_watch = 1;
         } else if (strcmp(argv[i], "--resumen") == 0 || strcmp(argv[i], "-r") == 0) {
             modo_resumen = 1;
@@ -628,6 +700,8 @@ int main(int argc, char *argv[]) {
             duracion_seg = atoi(argv[++i]);
         } else if (es_numerico(argv[i])) {
             pid_arg = atoi(argv[i]);
+        } else if (argv[i][0] != '-') {
+            nombre_arg = argv[i];
         }
     }
 
@@ -641,8 +715,23 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    int pid_raiz = (pid_arg > 0) ? pid_arg : elegir_pid_raiz_automatico(lista, n_procs);
-    if (pid_raiz <= 0) {
+    int pid_raiz = -1;
+    if (pid_arg > 0) {
+        pid_raiz = pid_arg;
+    } else if (nombre_arg != NULL) {
+        pid_raiz = buscar_pid_por_nombre(lista, n_procs, nombre_arg);
+        if (pid_raiz > 0) {
+            printf("[tracelite] Proceso '%s' resuelto al PID raíz %d.\n", nombre_arg, pid_raiz);
+        } else if (modo_resumen || modo_watch) {
+            fprintf(stderr, "[tracelite] No se encontró ningún proceso activo para '%s'.\n", nombre_arg);
+            free(lista);
+            return 1;
+        }
+    } else {
+        pid_raiz = elegir_pid_raiz_automatico(lista, n_procs);
+    }
+
+    if (pid_raiz <= 0 && nombre_arg == NULL) {
         fprintf(stderr, "[tracelite] PID raíz inválido.\n");
         free(lista);
         return 1;
@@ -682,12 +771,19 @@ int main(int argc, char *argv[]) {
 
     nodo_obs_t nodos[MAX_NODOS];
     int n_nodos = 0;
-    construir_subarbol(lista, n_procs, pid_raiz, raiz.span_id, nodos, &n_nodos, 0);
+    if (pid_raiz > 0) {
+        construir_subarbol(lista, n_procs, pid_raiz, raiz.span_id, nodos, &n_nodos, 0);
+    }
     free(lista);
 
     if (n_nodos == 0) {
-        fprintf(stderr, "[tracelite] El PID %d no está en /proc o no es accesible.\n", pid_raiz);
-        span_fin(&raiz, 1, "pid_no_encontrado", "");
+        if (nombre_arg != NULL && pid_raiz <= 0) {
+            fprintf(stderr, "[tracelite] No se encontró ningún proceso activo para '%s'.\n", nombre_arg);
+            span_fin(&raiz, 1, "proceso_no_encontrado", "error_proceso");
+        } else {
+            fprintf(stderr, "[tracelite] El PID %d no está en /proc o no es accesible.\n", pid_raiz);
+            span_fin(&raiz, 1, "pid_no_encontrado", "error_proceso");
+        }
     } else {
         printf("[tracelite] Árbol descubierto desde PID raíz %d (%d procesos):\n",
                pid_raiz, n_nodos);

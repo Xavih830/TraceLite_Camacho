@@ -1,5 +1,6 @@
 #include "common.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -11,12 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * Colector concurrente basado en Sockets UNIX (AF_UNIX) + Hilos (pthread)
- * para la Opción 3 (observación de procesos vivos del SO).
- * Muestra Trace ID, Span ID, Parent Span ID, Servicio, Operación,
- * Inicio (fecha/hora), Fin (hora/ms), Duración, Cascada, PID y Estado.
- */
+/* Colector concurrente (AF_UNIX + pthread): recibe spans, detecta anomalías e imprime la tabla */
 
 #define C_RESET  "\033[0m"
 #define C_BOLD   "\033[1m"
@@ -106,7 +102,7 @@ static tabla_layout_t calcular_layout(void) {
         l.w_casc = 8;
     }
 
-    /* Ancho fijo usado hasta ESTADO ("OK"/"ERROR"): columnas + espacios + "[casc]" */
+    /* Ancho fijo previo a la columna ESTADO */
     int usado = l.w_ini + 1 + l.w_fin + 1 + l.w_id + 1 + l.w_id + 1 +
                 l.w_serv + 1 + l.w_op + 1 + l.w_dur + 2 + (l.w_casc + 2) + 2 +
                 l.w_pid + 1 + 6;
@@ -180,9 +176,12 @@ static void imprimir_arbol(int idx, int *impresos, int nivel,
     char cascada[32];
     construir_cascada(cascada, l->w_casc, offset_ms, s->dur, total_ms);
 
-    const char *color_est = (s->estado == 0) ? C_GREEN : C_RED;
-    const char *color_bar = (s->estado == 0) ? C_CYAN : C_RED;
-    const char *est_txt   = (s->estado == 0) ? "OK" : "ERROR";
+    int es_error = (s->estado != 0);
+    int es_anom_tiempo = (!es_error && s->anomalia[0] != '\0');
+
+    const char *color_est = es_error ? C_RED : (es_anom_tiempo ? C_YELLOW : C_GREEN);
+    const char *color_bar = es_error ? C_RED : (es_anom_tiempo ? C_YELLOW : C_CYAN);
+    const char *est_txt   = es_error ? "ERROR" : (es_anom_tiempo ? "ANOMALIA" : "OK");
 
     printf("%-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %*s  %s[%s]%s  %-*d %s%s",
            l->w_ini, l->w_ini, ini_fecha,
@@ -196,8 +195,17 @@ static void imprimir_arbol(int idx, int *impresos, int nivel,
            l->w_pid, s->pid,
            color_est, est_txt);
 
-    if (s->msg[0] != '\0' && l->w_msg >= 4) {
-        printf(" (%.*s)", l->w_msg, s->msg);
+    int extra_usado = (int)strlen(est_txt) - 6;
+    if (extra_usado < 0) extra_usado = 0;
+
+    if (s->anomalia[0] != '\0') {
+        printf(" [%s]", s->anomalia);
+        extra_usado += (int)strlen(s->anomalia) + 3;
+    }
+
+    int rem_msg = l->w_msg - extra_usado;
+    if (s->msg[0] != '\0' && rem_msg >= 4) {
+        printf(" (%.*s)", rem_msg, s->msg);
     }
     printf("%s\n", C_RESET);
 
@@ -211,7 +219,91 @@ static void imprimir_arbol(int idx, int *impresos, int nivel,
     }
 }
 
+/* Detección estadística de anomalías de tiempo (Leave-One-Out: dur > mu_-i + 2*sigma_-i) */
+static void evaluar_anomalias_tiempo(void) {
+    for (int i = 0; i < n_spans; i++) {
+        if (spans[i].estado != 0 || spans[i].anomalia[0] != '\0') {
+            continue;
+        }
+        if (strcmp(spans[i].servicio, "tracelite") == 0) {
+            continue;
+        }
+
+        int mismos_serv = 0;
+        int mismos_traza = 0;
+        for (int j = 0; j < n_spans; j++) {
+            if (j == i) continue;
+            if (strcmp(spans[j].servicio, spans[i].servicio) == 0) {
+                mismos_serv++;
+            }
+            if (strcmp(spans[j].servicio, "tracelite") != 0 &&
+                strcmp(spans[j].trace_id, spans[i].trace_id) == 0) {
+                mismos_traza++;
+            }
+        }
+
+        int modo_ref = 0; /* 1: mismo servicio, 2: misma traza, 3: lote completo */
+        if (mismos_serv >= 2) {
+            modo_ref = 1;
+        } else if (mismos_traza >= 2) {
+            modo_ref = 2;
+        } else {
+            modo_ref = 3;
+        }
+
+        int n_ref = 0;
+        double suma = 0.0;
+        for (int j = 0; j < n_spans; j++) {
+            if (j == i) continue;
+            if (modo_ref == 1) {
+                if (strcmp(spans[j].servicio, spans[i].servicio) != 0) continue;
+            } else if (modo_ref == 2) {
+                if (strcmp(spans[j].servicio, "tracelite") == 0 ||
+                    strcmp(spans[j].trace_id, spans[i].trace_id) != 0) continue;
+            } else {
+                if (strcmp(spans[j].servicio, "tracelite") == 0) continue;
+            }
+            suma += spans[j].dur;
+            n_ref++;
+        }
+
+        if (n_ref < 2) {
+            continue;
+        }
+
+        double mu = suma / (double)n_ref;
+        double var = 0.0;
+        for (int j = 0; j < n_spans; j++) {
+            if (j == i) continue;
+            if (modo_ref == 1) {
+                if (strcmp(spans[j].servicio, spans[i].servicio) != 0) continue;
+            } else if (modo_ref == 2) {
+                if (strcmp(spans[j].servicio, "tracelite") == 0 ||
+                    strcmp(spans[j].trace_id, spans[i].trace_id) != 0) continue;
+            } else {
+                if (strcmp(spans[j].servicio, "tracelite") == 0) continue;
+            }
+            double diff = spans[j].dur - mu;
+            var += diff * diff;
+        }
+        double sigma = sqrt(var / (double)n_ref);
+        double umbral = mu + 2.0 * sigma;
+
+        if (spans[i].dur > umbral &&
+            spans[i].dur > 1.5 * mu &&
+            (spans[i].dur - mu) >= 10.0) {
+            snprintf(spans[i].anomalia, sizeof(spans[i].anomalia), "latencia_alta");
+            if (spans[i].msg[0] == '\0') {
+                snprintf(spans[i].msg, sizeof(spans[i].msg),
+                         "mu=%.1fms umbral=%.1fms", mu, umbral);
+            }
+        }
+    }
+}
+
 static void imprimir_todas_las_trazas(void) {
+    evaluar_anomalias_tiempo();
+
     struct timespec ts_real, ts_mono;
     clock_gettime(CLOCK_REALTIME, &ts_real);
     clock_gettime(CLOCK_MONOTONIC, &ts_mono);
@@ -282,8 +374,18 @@ static void imprimir_todas_las_trazas(void) {
         }
     }
 
-    printf("\n%s-- Resumen: %d trazas, %d spans --%s\n",
-           C_BOLD, num_trazas, n_spans, C_RESET);
+    int total_err = 0;
+    int total_anom_t = 0;
+    for (int i = 0; i < n_spans; i++) {
+        if (spans[i].estado != 0) {
+            total_err++;
+        } else if (spans[i].anomalia[0] != '\0') {
+            total_anom_t++;
+        }
+    }
+
+    printf("\n%s-- Resumen: %d trazas, %d spans | %d errores, %d anomalias de tiempo --%s\n",
+           C_BOLD, num_trazas, n_spans, total_err, total_anom_t, C_RESET);
     free(impresos);
     free(traza_vista);
 }

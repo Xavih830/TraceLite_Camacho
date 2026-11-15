@@ -1,6 +1,6 @@
 CC      = gcc
 CFLAGS  = -std=gnu11 -Wall -Wextra -O2 -Iinclude
-LDFLAGS = -pthread
+LDFLAGS = -pthread -lm
 BIN     = bin
 COMUN   = src/common.c
 

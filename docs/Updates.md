@@ -234,3 +234,50 @@ Este archivo registra cronológicamente cada cambio implementado en el proyecto.
 - Se actualizó `opcion3_procesos_vivos/orquestador_pids.c`:
   - En modo `--resumen`, la duración predeterminada pasó a **60 segundos** automáticos (sin requerir `Ctrl+C`, manteniendo `-d <seg>` para personalizarla o `-d 0` para modo manual).
   - Se añadió un contador en vivo en la misma línea (`\r[orquestador] Capturando PID ...: X / 60 s`) que muestra los segundos transcurridos y los procesos detectados hasta el cierre automático.
+
+---
+
+## [2026-11-15] Detección estadística de anomalías de tiempo ($\mu + 2\sigma$) y diferenciación explícita de anomalías
+
+### Fórmula implementada para anomalía de tiempo (`latencia_alta`)
+Para detectar incrementos aleatorios o picos anómalos en el tiempo de ejecución sin depender de un umbral fijo manual, `src/collector.c` (`evaluar_anomalias_tiempo`) evalúa cada span $i$ con estado `OK` mediante el método estadístico **Leave-One-Out ($\mu_{-i} + 2\sigma_{-i}$)** (excluyendo al propio span $i$ para evitar que un pico extremo contamine su propia línea base en muestras pequeñas):
+
+1. **Conjunto de referencia ($N_{\text{ref}} \ge 2$, equivalente a $\ge 3$ spans comparables):**
+   - **Nivel 1 (mismo servicio):** se comparan los demás spans con el mismo `servicio`.
+   - **Nivel 2 (traza / lote):** si no hay suficientes spans del mismo servicio, se comparan los demás spans de la misma traza (o del lote completo si la traza tiene $< 3$ spans), excluyendo el span observador `"tracelite"`.
+2. **Fórmula:**
+   $$\mu_{-i} = \frac{1}{N_{\text{ref}}} \sum_{j \ne i} d_j, \qquad \sigma_{-i} = \sqrt{\frac{1}{N_{\text{ref}}} \sum_{j \ne i} (d_j - \mu_{-i})^2}$$
+   $$T_{\text{anom}} = \mu_{-i} + 2\sigma_{-i}$$
+3. **Condición de disparo (con filtro anti-jitter del SO):**
+   Un span se marca con `anomalia = "latencia_alta"` cuando se cumplen simultáneamente:
+   - $d_i > \mu_{-i} + 2\sigma_{-i}$
+   - $d_i > 1.5\,\mu_{-i}$ (al menos $50\%$ por encima de la media de referencia)
+   - $d_i - \mu_{-i} \ge 10.0\text{ ms}$ (evita falsos positivos por variación mínima de reloj)
+
+### Qué se implementó
+- **`src/collector.c` y `Makefile`:**
+  - Se enlazó `-lm` en `Makefile` y se implementó `evaluar_anomalias_tiempo()` antes de imprimir las trazas.
+  - En la columna `ESTADO` ahora se distingue explícitamente el tipo de anomalía:
+    - `ERROR [error_proceso]` (rojo) para fallos de proceso/PID.
+    - `ANOMALIA [latencia_alta]` (amarillo, junto con barra amarilla en `CASCADA`) para picos estadísticos de duración.
+    - `OK` (verde) para spans normales.
+  - La línea final `-- Resumen: ... --` reporta también el conteo de errores y anomalías de tiempo.
+- **`src/monitor_pid.c` y `src/tracelite.c`:**
+  - Al finalizar un span con error (`pid_no_encontrado`, `no_existe_en_proc`, `proceso_termino`), se rellena explícitamente `span_t.anomalia` con `"error_proceso"`.
+- **Verificación:**
+  - `make && make test` superado sin advertencias (`sizeof(span_t) = 264 bytes`).
+  - Prueba de error (`./bin/tracelite 999999`): `ERROR [error_proceso]` (`1 errores, 0 anomalias de tiempo`).
+  - Prueba de latencia variable (`sleep 0.25` x3 + `sleep 2.0` con `--resumen -d 3`): `sleep` de `2113.96 ms` frente a `301.48 ms` marcado como `ANOMALIA [latencia_alta]`.
+
+---
+
+## [2026-11-15] Resolución por nombre de proceso, simplificación de comentarios y limpieza de `--resumen`
+
+### Qué se implementó
+- **Resolución automática por nombre (`src/tracelite.c`, `README.md`):**
+  - Se añadió `buscar_pid_por_nombre()` y soporte de línea de comandos para pasar un nombre de proceso en lugar del PID (`./bin/tracelite antigravity`, `./bin/tracelite --resumen -d 30 antigravity`, `./bin/tracelite chrome`, `./bin/tracelite postgres`).
+  - Se agregó `--help` (`-h`) con ejemplos listos por nombre.
+- **Limpieza de la tabla en `--resumen` (`src/tracelite.c`):**
+  - Se eliminó la etiqueta `ticks:+N (vivo|fin)` en la columna `OPERACION`, mostrando directamente el comando/operación real leído desde `/proc/<pid>/cmdline`.
+- **Refactorización de comentarios:**
+  - Se simplificaron los comentarios en `include/*.h`, `src/*.c` y `tests/test_span.c` a guías breves de sección orientadas al programador.

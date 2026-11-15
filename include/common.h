@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include "span.h"
 
+/* Reloj, esperas, E/S binaria por fd, IDs y ciclo de vida de spans */
 int64_t ahora_ns(void);
 void    dormir_ms(int ms);
 int     escribir_exacto(int fd, const void *buf, size_t n);

@@ -50,27 +50,30 @@ make clean
 
 ## 3. Modos de Uso de `./bin/tracelite`
 
-### Modo árbol automático / por PID (predeterminado)
-Escanea `/proc` leyendo `PID` y `PPID`, descubre el subárbol completo desde un PID raíz, lanza un proceso `./bin/monitor_pid` en paralelo por cada nodo usando `fork()` + `execv()`, y envía los spans al colector vía `/tmp/tracelite.sock`:
+### Modo árbol automático / por nombre o PID (predeterminado)
+Escanea `/proc` leyendo `PID` y `PPID`, descubre el subárbol completo desde un nombre de proceso o PID raíz, lanza un proceso `./bin/monitor_pid` en paralelo por cada nodo usando `fork()` + `execv()`, y envía los spans al colector vía `/tmp/tracelite.sock`:
 ```bash
 ./bin/tracelite
-./bin/tracelite <PID_RAIZ>
-# Ejemplo en Linux para observar toda la jerarquía de Chrome o Antigravity:
-./bin/tracelite $(pgrep -o chrome)
+./bin/tracelite <PID_RAIZ | NOMBRE>
+# Ejemplos intuitivos por nombre en Lubuntu:
+./bin/tracelite antigravity
+./bin/tracelite chrome
+./bin/tracelite postgres
 ```
 
 ### Modo `--resumen` (captura continua con cierre automático en 60 s)
-Monitorea la aparición y finalización de subprocesos bajo un PID raíz durante **60 segundos** (con contador en vivo en terminal) y al finalizar imprime la tabla consolidada:
+Monitorea la aparición y finalización de subprocesos bajo un proceso o PID raíz durante **60 segundos** (con contador en vivo en terminal) y al finalizar imprime la tabla consolidada:
 ```bash
-./bin/tracelite --resumen <PID_RAIZ>
+./bin/tracelite --resumen antigravity
 # Personalizar duración en segundos (-d) o intervalo en ms (--interval):
-./bin/tracelite --resumen -d 15 --interval 150 <PID_RAIZ>
+./bin/tracelite --resumen -d 30 antigravity
+./bin/tracelite --resumen -d 20 chrome
 ```
 
 ### Modo `--watch` (streaming en tiempo real)
-Envía eventos al colector en vivo conforme nacen o terminan subprocesos bajo el PID raíz:
+Envía eventos al colector en vivo conforme nacen o terminan subprocesos bajo el proceso observado:
 ```bash
-./bin/tracelite --watch <PID_RAIZ>
+./bin/tracelite --watch antigravity
 ```
 
 ---

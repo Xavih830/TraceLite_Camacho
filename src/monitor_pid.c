@@ -7,15 +7,9 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-/*
- * Agente observador (monitor_pid): lanzado mediante fork() + execv() por cada PID vivo
- * en la jerarquía descubierta. Lee /proc/<pid>/comm, /proc/<pid>/cmdline,
- * /proc/<pid>/wchan y /proc/<pid>/stat para reportar la operación/rol real del proceso
- * (por ejemplo renderer, gpu-process, extensionHost, o su comando) al colector vía Socket UNIX.
- *
- * Uso: ./monitor_pid <pid> <trace_id> <own_span_id> <parent_id> <sock_path> <ms>
- */
+/* Agente observador por PID: lee /proc y envía su span al colector por Socket UNIX */
 
+/* Extracción de rol real desde /proc/<pid>/cmdline */
 static void extraer_rol_cmdline(int pid, char *out, size_t out_sz) {
     out[0] = '\0';
     char ruta[64];
@@ -33,7 +27,7 @@ static void extraer_rol_cmdline(int pid, char *out, size_t out_sz) {
     }
     buf[n] = '\0';
 
-    /* Recorrer los argumentos separados por '\0' */
+    /* Lectura de argumentos separados por '\0' */
     const char *arg0 = buf;
     const char *base0 = strrchr(arg0, '/');
     base0 = (base0 != NULL && base0[1] != '\0') ? (base0 + 1) : arg0;
@@ -172,7 +166,7 @@ int main(int argc, char *argv[]) {
         span_ini(&s, trace_id, parent_id, "proc_inaccesible", "no_encontrado");
         snprintf(s.span_id, sizeof(s.span_id), "%s", own_span_id);
         s.pid = pid_obj;
-        span_fin(&s, 1, "no_existe_en_proc", "");
+        span_fin(&s, 1, "no_existe_en_proc", "error_proceso");
     } else {
         char rol[36];
         extraer_rol_cmdline(pid_obj, rol, sizeof(rol));
@@ -190,7 +184,7 @@ int main(int argc, char *argv[]) {
         char state_fin = '?';
         if (leer_proc_stat(pid_obj, comm_fin, sizeof(comm_fin), &state_fin) != 0) {
             snprintf(s.operacion, sizeof(s.operacion), "%.24s [EXIT]", rol);
-            span_fin(&s, 1, "proceso_termino", "");
+            span_fin(&s, 1, "proceso_termino", "error_proceso");
         } else {
             char wchan[24];
             leer_wchan(pid_obj, wchan, sizeof(wchan));

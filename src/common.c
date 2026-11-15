@@ -7,10 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * Inicializa la semilla aleatoria una vez por proceso (PID) usando
- * la alternativa aprobada en la sección 0.1: srand(getpid() ^ time(NULL)).
- */
+/* Semilla aleatoria única por proceso */
 static void asegurar_semilla(void) {
     static int pid_inicializado = 0;
     int pid_actual = (int)getpid();
