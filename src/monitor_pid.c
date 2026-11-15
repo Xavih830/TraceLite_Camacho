@@ -9,77 +9,30 @@
 
 /* Agente observador por PID: lee /proc y envía su span al colector por Socket UNIX */
 
-/* Extracción de rol real desde /proc/<pid>/cmdline */
-static void extraer_rol_cmdline(int pid, char *out, size_t out_sz) {
-    out[0] = '\0';
+/* Lectura de comando completo desde /proc/<pid>/cmdline */
+static void leer_cmdline_proc(int pid, const char *comm_fallback, char *out, size_t out_sz) {
     char ruta[64];
     snprintf(ruta, sizeof(ruta), "/proc/%d/cmdline", pid);
     FILE *f = fopen(ruta, "r");
-    if (f == NULL) {
-        return;
-    }
-
-    char buf[512];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    if (n == 0) {
-        return;
-    }
-    buf[n] = '\0';
-
-    /* Lectura de argumentos separados por '\0' */
-    const char *arg0 = buf;
-    const char *base0 = strrchr(arg0, '/');
-    base0 = (base0 != NULL && base0[1] != '\0') ? (base0 + 1) : arg0;
-
-    char tipo_electron[32] = "";
-    char subtipo_util[32] = "";
-    char primer_arg[48] = "";
-
-    size_t pos = strlen(arg0) + 1;
-    while (pos < n) {
-        const char *arg = buf + pos;
-        if (strncmp(arg, "--type=", 7) == 0) {
-            snprintf(tipo_electron, sizeof(tipo_electron), "%s", arg + 7);
-        } else if (strncmp(arg, "--utility-sub-type=", 19) == 0) {
-            const char *val = arg + 19;
-            const char *punto = strrchr(val, '.');
-            snprintf(subtipo_util, sizeof(subtipo_util), "%s",
-                     (punto != NULL && punto[1] != '\0') ? (punto + 1) : val);
-        } else if (primer_arg[0] == '\0' && arg[0] != '\0' && arg[0] != '-') {
-            snprintf(primer_arg, sizeof(primer_arg), "%s", arg);
-        }
-        pos += strlen(arg) + 1;
-    }
-
-    if (tipo_electron[0] != '\0') {
-        if (subtipo_util[0] != '\0') {
-            snprintf(out, out_sz, "%s:%s", tipo_electron, subtipo_util);
-        } else {
-            snprintf(out, out_sz, "%s", tipo_electron);
-        }
-    } else if (primer_arg[0] != '\0') {
-        snprintf(out, out_sz, "%s %s", base0, primer_arg);
-    } else {
-        snprintf(out, out_sz, "%s", base0);
-    }
-}
-
-static void leer_wchan(int pid, char *wchan_out, size_t sz) {
-    wchan_out[0] = '\0';
-    char ruta[64];
-    snprintf(ruta, sizeof(ruta), "/proc/%d/wchan", pid);
-    FILE *f = fopen(ruta, "r");
-    if (f == NULL) {
-        return;
-    }
-    if (fgets(wchan_out, (int)sz, f) != NULL) {
-        size_t len = strlen(wchan_out);
-        while (len > 0 && (wchan_out[len - 1] == '\n' || wchan_out[len - 1] == ' ')) {
-            wchan_out[--len] = '\0';
+    if (f != NULL) {
+        size_t n = fread(out, 1, out_sz - 1, f);
+        fclose(f);
+        if (n > 0) {
+            for (size_t i = 0; i < n; i++) {
+                if (out[i] == '\0') {
+                    out[i] = ' ';
+                }
+            }
+            while (n > 0 && out[n - 1] == ' ') {
+                n--;
+            }
+            out[n] = '\0';
+            if (out[0] != '\0') {
+                return;
+            }
         }
     }
-    fclose(f);
+    snprintf(out, out_sz, "%s", comm_fallback);
 }
 
 static int leer_proc_stat(int pid, char *comm_out, size_t comm_sz, char *state_out) {
@@ -168,13 +121,10 @@ int main(int argc, char *argv[]) {
         s.pid = pid_obj;
         span_fin(&s, 1, "no_existe_en_proc", "error_proceso");
     } else {
-        char rol[36];
-        extraer_rol_cmdline(pid_obj, rol, sizeof(rol));
-        if (rol[0] == '\0') {
-            snprintf(rol, sizeof(rol), "%s", comm);
-        }
+        char op[48];
+        leer_cmdline_proc(pid_obj, comm, op, sizeof(op));
 
-        span_ini(&s, trace_id, parent_id, comm, rol);
+        span_ini(&s, trace_id, parent_id, comm, op);
         snprintf(s.span_id, sizeof(s.span_id), "%s", own_span_id);
         s.pid = pid_obj;
 
@@ -183,18 +133,8 @@ int main(int argc, char *argv[]) {
         char comm_fin[24];
         char state_fin = '?';
         if (leer_proc_stat(pid_obj, comm_fin, sizeof(comm_fin), &state_fin) != 0) {
-            snprintf(s.operacion, sizeof(s.operacion), "%.24s [EXIT]", rol);
             span_fin(&s, 1, "proceso_termino", "error_proceso");
         } else {
-            char wchan[24];
-            leer_wchan(pid_obj, wchan, sizeof(wchan));
-            if (state_fin == 'R') {
-                snprintf(s.operacion, sizeof(s.operacion), "%.28s [CPU]", rol);
-            } else if (wchan[0] != '\0' && strcmp(wchan, "0") != 0) {
-                snprintf(s.operacion, sizeof(s.operacion), "%.22s [%.16s]", rol, wchan);
-            } else {
-                snprintf(s.operacion, sizeof(s.operacion), "%.36s [%c]", rol, state_fin);
-            }
             span_fin(&s, 0, "", "");
         }
     }
