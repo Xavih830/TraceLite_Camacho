@@ -214,3 +214,23 @@ Este archivo registra cronológicamente cada cambio implementado en el proyecto.
 - Se corrigió `opcion3_procesos_vivos/orquestador_pids.c`: al hacer `fork()` para lanzar `collector_sock` en `ejecutar_modo_resumen()` (y en modo snapshot), el proceso hijo ahora ejecuta `signal(SIGINT, SIG_IGN)` antes de `execv()`.
 - Con esto, cuando el usuario presiona `Ctrl+C` en la terminal, el kernel no mata prematuramente a `collector_sock` junto con el grupo de procesos en primer plano: `orquestador_pids` captura `SIGINT`, envía todos los spans consolidados y `__FIN__`, y `collector_sock` imprime la tabla completa antes de salir.
 - Se recompiló con `make && make test` y se verificó enviando `SIGINT` (`kill -INT`) tras 1 s de captura sobre `antigravity-ide` (`PID 1937`), imprimiendo correctamente `1 trazas, 23 spans`.
+
+---
+
+## [2026-11-15] Opción 3: Mostrar operación/rol real del proceso (`/proc/<pid>/cmdline` y `/proc/<pid>/wchan`)
+
+### Qué se implementó
+- Se actualizó `opcion3_procesos_vivos/monitor_pid.c` para reemplazar el texto `estado:S->S ticks:+0` por la operación o rol real que desempeña cada proceso:
+  - Lectura de `/proc/<pid>/cmdline` (`extraer_rol_cmdline`) para identificar subprocesos específicos (como `--type=renderer`, `--type=gpu-process`, `--type=utility:...` en apps Electron/Chromium como Antigravity o Chrome, o el comando/argumento real en procesos estándar).
+  - Lectura de `/proc/<pid>/wchan` (`leer_wchan`) para mostrar entre corchetes qué está haciendo en el kernel (`[CPU]` si está ejecutando, o la llamada de espera como `[ep_poll]`, `[futex_wait_queue]`, `[do_wait]`).
+
+---
+
+## [2026-11-15] Formato adaptable al ancho de terminal (`TIOCGWINSZ`) y temporizador automático de 60 s en `--resumen`
+
+### Qué se implementó
+- Se agregó detección automática del ancho de la terminal (`ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws)` con respaldo en `COLUMNS`) en `opcion2_comandos/collector_sock.c` y `opcion3_procesos_vivos/collector_sock.c`:
+  - Ajusta dinámicamente los anchos de `INICIO`, `SPAN_ID`, `PARENT_ID`, `SERVICIO`, `OPERACION`, `CASCADA`, la línea separadora y el recorte de mensajes (`msg`) para que ninguna fila se corte o salte de línea al maximizar o redimensionar la terminal.
+- Se actualizó `opcion3_procesos_vivos/orquestador_pids.c`:
+  - En modo `--resumen`, la duración predeterminada pasó a **60 segundos** automáticos (sin requerir `Ctrl+C`, manteniendo `-d <seg>` para personalizarla o `-d 0` para modo manual).
+  - Se añadió un contador en vivo en la misma línea (`\r[orquestador] Capturando PID ...: X / 60 s`) que muestra los segundos transcurridos y los procesos detectados hasta el cierre automático.

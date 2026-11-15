@@ -157,8 +157,8 @@ static int cargar_procesos_so(proc_info_t *lista, int max_procs, int mi_pid) {
 
         proc_info_t info;
         if (leer_info_proc(pid, &info) == 0) {
-            if (strcmp(info.comm, "orquestador_pid") != 0 &&
-                strcmp(info.comm, "collector_sock") != 0 &&
+            if (strcmp(info.comm, "tracelite") != 0 &&
+                strcmp(info.comm, "collector") != 0 &&
                 strcmp(info.comm, "monitor_pid") != 0) {
                 lista[count++] = info;
             }
@@ -304,15 +304,15 @@ static int ejecutar_modo_watch(int pid_raiz, const char *sock_path,
         return 1;
     }
     if (pid_col == 0) {
-        char *args_col[4] = { "./collector_sock", (char *)sock_path, "--stream", NULL };
-        execv("./collector_sock", args_col);
+        char *args_col[4] = { "./bin/collector", (char *)sock_path, "--stream", NULL };
+        execv("./bin/collector", args_col);
         perror("execv collector_sock");
         _exit(127);
     }
 
     int sock_fd = conectar_colector(sock_path);
     if (sock_fd < 0) {
-        fprintf(stderr, "[orquestador] No se pudo conectar con collector_sock.\n");
+        fprintf(stderr, "[tracelite] No se pudo conectar con collector_sock.\n");
         waitpid(pid_col, NULL, 0);
         return 1;
     }
@@ -320,7 +320,7 @@ static int ejecutar_modo_watch(int pid_raiz, const char *sock_path,
     char trace_id[33];
     id_hex(trace_id, 16);
 
-    printf("[orquestador] Modo --watch activo sobre PID %d (intervalo %d ms). Ctrl+C para detener.\n",
+    printf("[tracelite] Modo --watch activo sobre PID %d (intervalo %d ms). Ctrl+C para detener.\n",
            pid_raiz, interval_ms);
     fflush(stdout);
 
@@ -416,7 +416,7 @@ static int ejecutar_modo_watch(int pid_raiz, const char *sock_path,
         }
 
         if (n_sub == 0) {
-            printf("[orquestador] PID raíz %d finalizó.\n", pid_raiz);
+            printf("[tracelite] PID raíz %d finalizó.\n", pid_raiz);
             break;
         }
 
@@ -455,20 +455,20 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
     }
     if (pid_col == 0) {
         signal(SIGINT, SIG_IGN);
-        char *args_col[3] = { "./collector_sock", (char *)sock_path, NULL };
-        execv("./collector_sock", args_col);
+        char *args_col[3] = { "./bin/collector", (char *)sock_path, NULL };
+        execv("./bin/collector", args_col);
         perror("execv collector_sock");
         _exit(127);
     }
 
     span_t raiz;
-    span_ini(&raiz, NULL, NULL, "orquestador", "resumen_arbol_so");
+    span_ini(&raiz, NULL, NULL, "tracelite", "resumen_arbol_so");
 
     if (duracion_seg > 0) {
-        printf("[orquestador] Modo --resumen activo sobre PID %d (%d s, intervalo %d ms). Capturando...\n",
+        printf("[tracelite] Modo --resumen activo sobre PID %d (%d s, intervalo %d ms). Capturando...\n",
                pid_raiz, duracion_seg, interval_ms);
     } else {
-        printf("[orquestador] Modo --resumen activo sobre PID %d (intervalo %d ms). Ctrl+C para imprimir tabla.\n",
+        printf("[tracelite] Modo --resumen activo sobre PID %d (intervalo %d ms). Ctrl+C para imprimir tabla.\n",
                pid_raiz, interval_ms);
     }
     fflush(stdout);
@@ -487,6 +487,7 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
     int n_hist = 0;
     int64_t t_inicio_ns = ahora_ns();
     int64_t limite_ns = (duracion_seg > 0) ? (int64_t)duracion_seg * 1000000000LL : 0;
+    int ultimo_seg_mostrado = -1;
 
     while (!detener_watch) {
         int n_procs = cargar_procesos_so(lista, MAX_PROCS_SO, (int)getpid());
@@ -545,12 +546,25 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
         if (n_sub == 0) {
             break;
         }
+        int seg_transcurridos = (int)((t_now - t_inicio_ns) / 1000000000LL);
+        if (seg_transcurridos != ultimo_seg_mostrado) {
+            ultimo_seg_mostrado = seg_transcurridos;
+            if (duracion_seg > 0) {
+                printf("\r[tracelite] Capturando PID %d: %2d / %d s (%d procesos registrados)...",
+                       pid_raiz, seg_transcurridos, duracion_seg, n_hist);
+            } else {
+                printf("\r[tracelite] Capturando PID %d: %2d s (%d procesos registrados)...",
+                       pid_raiz, seg_transcurridos, n_hist);
+            }
+            fflush(stdout);
+        }
         if (limite_ns > 0 && (t_now - t_inicio_ns) >= limite_ns) {
             break;
         }
 
         dormir_ms(interval_ms);
     }
+    printf("\n");
 
     span_fin(&raiz, (n_hist == 0) ? 1 : 0, (n_hist == 0) ? "pid_no_encontrado" : "", "");
 
@@ -592,12 +606,12 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
 }
 
 int main(int argc, char *argv[]) {
-    const char *sock_path = "/tmp/tracelite_op3.sock";
+    const char *sock_path = "/tmp/tracelite.sock";
     int modo_watch = 0;
     int modo_resumen = 0;
     int interval_ms = 150;
     int max_ciclos = 0;
-    int duracion_seg = 0;
+    int duracion_seg = -1;
     int pid_arg = -1;
 
     for (int i = 1; i < argc; i++) {
@@ -622,20 +636,23 @@ int main(int argc, char *argv[]) {
 
     int n_procs = cargar_procesos_so(lista, MAX_PROCS_SO, (int)getpid());
     if (n_procs == 0) {
-        fprintf(stderr, "[orquestador] No se encontraron procesos accesibles en /proc.\n");
+        fprintf(stderr, "[tracelite] No se encontraron procesos accesibles en /proc.\n");
         free(lista);
         return 1;
     }
 
     int pid_raiz = (pid_arg > 0) ? pid_arg : elegir_pid_raiz_automatico(lista, n_procs);
     if (pid_raiz <= 0) {
-        fprintf(stderr, "[orquestador] PID raíz inválido.\n");
+        fprintf(stderr, "[tracelite] PID raíz inválido.\n");
         free(lista);
         return 1;
     }
 
     if (modo_resumen) {
         free(lista);
+        if (duracion_seg < 0) {
+            duracion_seg = 60;
+        }
         return ejecutar_modo_resumen(pid_raiz, sock_path, interval_ms, duracion_seg);
     }
     if (modo_watch) {
@@ -653,15 +670,15 @@ int main(int argc, char *argv[]) {
     }
     if (pid_col == 0) {
         signal(SIGINT, SIG_IGN);
-        char *args_col[3] = { "./collector_sock", (char *)sock_path, NULL };
-        execv("./collector_sock", args_col);
+        char *args_col[3] = { "./bin/collector", (char *)sock_path, NULL };
+        execv("./bin/collector", args_col);
         perror("execv collector_sock");
         _exit(127);
     }
 
     /* 2. Crear span raíz del orquestador y construir el árbol real de PIDs */
     span_t raiz;
-    span_ini(&raiz, NULL, NULL, "orquestador", "arbol_ppid_so");
+    span_ini(&raiz, NULL, NULL, "tracelite", "arbol_ppid_so");
 
     nodo_obs_t nodos[MAX_NODOS];
     int n_nodos = 0;
@@ -669,10 +686,10 @@ int main(int argc, char *argv[]) {
     free(lista);
 
     if (n_nodos == 0) {
-        fprintf(stderr, "[orquestador] El PID %d no está en /proc o no es accesible.\n", pid_raiz);
+        fprintf(stderr, "[tracelite] El PID %d no está en /proc o no es accesible.\n", pid_raiz);
         span_fin(&raiz, 1, "pid_no_encontrado", "");
     } else {
-        printf("[orquestador] Árbol descubierto desde PID raíz %d (%d procesos):\n",
+        printf("[tracelite] Árbol descubierto desde PID raíz %d (%d procesos):\n",
                pid_raiz, n_nodos);
         for (int i = 0; i < n_nodos; i++) {
             printf("  - PID %-6d (%s)\n", nodos[i].pid, nodos[i].comm);
@@ -688,7 +705,7 @@ int main(int argc, char *argv[]) {
             char pid_str[16];
             snprintf(pid_str, sizeof(pid_str), "%d", nodos[i].pid);
             char *args_mon[8] = {
-                "./monitor_pid",
+                "./bin/monitor_pid",
                 pid_str,
                 raiz.trace_id,
                 nodos[i].span_id,
@@ -697,7 +714,7 @@ int main(int argc, char *argv[]) {
                 "250",
                 NULL
             };
-            execv("./monitor_pid", args_mon);
+            execv("./bin/monitor_pid", args_mon);
             perror("execv monitor_pid");
             _exit(127);
         }

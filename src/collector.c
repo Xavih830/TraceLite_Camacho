@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
@@ -48,6 +49,80 @@ static void formatear_fecha_ns(int64_t real_ns, char *buf, size_t sz, int inclui
     }
 }
 
+typedef struct {
+    int cols;
+    int ini_con_fecha;
+    int w_ini;
+    int w_fin;
+    int w_id;
+    int w_serv;
+    int w_op;
+    int w_dur;
+    int w_casc;
+    int w_pid;
+    int w_msg;
+} tabla_layout_t;
+
+static int obtener_ancho_terminal(void) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 20) {
+        return (int)ws.ws_col;
+    }
+    const char *env_cols = getenv("COLUMNS");
+    if (env_cols != NULL) {
+        int c = atoi(env_cols);
+        if (c > 20) return c;
+    }
+    return 120;
+}
+
+static tabla_layout_t calcular_layout(void) {
+    tabla_layout_t l;
+    l.cols = obtener_ancho_terminal();
+    l.w_fin = 12;
+    l.w_dur = 9;
+    l.w_pid = 5;
+
+    if (l.cols >= 165) {
+        l.ini_con_fecha = 1;
+        l.w_ini  = 23;
+        l.w_id   = 16;
+        l.w_serv = 22;
+        l.w_op   = 26;
+        l.w_casc = 16;
+    } else if (l.cols >= 125) {
+        l.ini_con_fecha = 0;
+        l.w_ini  = 12;
+        l.w_id   = 12;
+        l.w_serv = 20;
+        l.w_op   = 22;
+        l.w_casc = 12;
+    } else {
+        l.ini_con_fecha = 0;
+        l.w_ini  = 12;
+        l.w_id   = 8;
+        l.w_serv = 16;
+        l.w_op   = 16;
+        l.w_casc = 8;
+    }
+
+    /* Ancho fijo usado hasta ESTADO ("OK"/"ERROR"): columnas + espacios + "[casc]" */
+    int usado = l.w_ini + 1 + l.w_fin + 1 + l.w_id + 1 + l.w_id + 1 +
+                l.w_serv + 1 + l.w_op + 1 + l.w_dur + 2 + (l.w_casc + 2) + 2 +
+                l.w_pid + 1 + 6;
+    l.w_msg = l.cols - usado - 3;
+    if (l.w_msg < 0) l.w_msg = 0;
+    return l;
+}
+
+static void imprimir_separador(int ancho) {
+    printf("%s", C_DIM);
+    for (int i = 0; i < ancho; i++) {
+        putchar('-');
+    }
+    printf("%s\n", C_RESET);
+}
+
 static void construir_cascada(char *buf, int ancho, double offset_ms,
                               double dur_ms, double total_ms) {
     if (total_ms <= 0.0) {
@@ -68,7 +143,7 @@ static void construir_cascada(char *buf, int ancho, double offset_ms,
 
 static void imprimir_arbol(int idx, int *impresos, int nivel,
                            int64_t traza_ini_ns, double total_ms,
-                           int64_t delta_real_mono) {
+                           int64_t delta_real_mono, const tabla_layout_t *l) {
     if (idx < 0 || idx >= n_spans || impresos[idx] || nivel > 32) {
         return;
     }
@@ -83,7 +158,7 @@ static void imprimir_arbol(int idx, int *impresos, int nivel,
 
     char ini_fecha[32];
     char fin_hora[20];
-    formatear_fecha_ns(s->ini + delta_real_mono, ini_fecha, sizeof(ini_fecha), 1);
+    formatear_fecha_ns(s->ini + delta_real_mono, ini_fecha, sizeof(ini_fecha), l->ini_con_fecha);
     formatear_fecha_ns(s->fin + delta_real_mono, fin_hora, sizeof(fin_hora), 0);
 
     const char *parent_str = (s->parent[0] != '\0') ? s->parent : "(raiz)";
@@ -102,27 +177,27 @@ static void imprimir_arbol(int idx, int *impresos, int nivel,
     char dur_str[16];
     snprintf(dur_str, sizeof(dur_str), "%.2f ms", s->dur);
 
-    char cascada[17];
-    construir_cascada(cascada, 16, offset_ms, s->dur, total_ms);
+    char cascada[32];
+    construir_cascada(cascada, l->w_casc, offset_ms, s->dur, total_ms);
 
     const char *color_est = (s->estado == 0) ? C_GREEN : C_RED;
     const char *color_bar = (s->estado == 0) ? C_CYAN : C_RED;
     const char *est_txt   = (s->estado == 0) ? "OK" : "ERROR";
 
-    printf("%-23s %-12s %-16s %-16s %-24.24s %-26.26s %9s  %s[%s]%s  %-5d %s%s",
-           ini_fecha,
-           fin_hora,
-           s->span_id,
-           parent_str,
-           serv_col,
-           s->operacion,
-           dur_str,
+    printf("%-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %*s  %s[%s]%s  %-*d %s%s",
+           l->w_ini, l->w_ini, ini_fecha,
+           l->w_fin, l->w_fin, fin_hora,
+           l->w_id, l->w_id, s->span_id,
+           l->w_id, l->w_id, parent_str,
+           l->w_serv, l->w_serv, serv_col,
+           l->w_op, l->w_op, s->operacion,
+           l->w_dur, dur_str,
            color_bar, cascada, C_RESET,
-           s->pid,
+           l->w_pid, s->pid,
            color_est, est_txt);
 
-    if (s->msg[0] != '\0') {
-        printf(" (%s)", s->msg);
+    if (s->msg[0] != '\0' && l->w_msg >= 4) {
+        printf(" (%.*s)", l->w_msg, s->msg);
     }
     printf("%s\n", C_RESET);
 
@@ -131,7 +206,7 @@ static void imprimir_arbol(int idx, int *impresos, int nivel,
             strcmp(spans[i].trace_id, s->trace_id) == 0 &&
             s->span_id[0] != '\0' &&
             strcmp(spans[i].parent, s->span_id) == 0) {
-            imprimir_arbol(i, impresos, nivel + 1, traza_ini_ns, total_ms, delta_real_mono);
+            imprimir_arbol(i, impresos, nivel + 1, traza_ini_ns, total_ms, delta_real_mono, l);
         }
     }
 }
@@ -174,26 +249,35 @@ static void imprimir_todas_las_trazas(void) {
         char inicio_traza[32];
         formatear_fecha_ns(min_ini + delta_real_mono, inicio_traza, sizeof(inicio_traza), 1);
 
+        tabla_layout_t l = calcular_layout();
+
         num_trazas++;
         printf("\n%s%sTRACE ID: %s%s  %s| Start: %s | Duracion total: %.2f ms%s\n",
                C_BOLD, C_YELLOW, tid, C_RESET, C_DIM, inicio_traza, total_ms, C_RESET);
-        printf("%s%-23s %-12s %-16s %-16s %-24s %-26s %9s  %-18s  %-5s %s%s\n",
+        printf("%s%-*s %-*s %-*s %-*s %-*s %-*s %*s  %-*s  %-*s %s%s\n",
                C_BOLD,
-               "INICIO", "FIN", "SPAN_ID", "PARENT_ID", "SERVICIO", "OPERACION",
-               "DURACION", "CASCADA", "PID", "ESTADO", C_RESET);
-        printf("%s--------------------------------------------------------------------------------------------------------------------------------------------------------------------------%s\n",
-               C_DIM, C_RESET);
+               l.w_ini, "INICIO",
+               l.w_fin, "FIN",
+               l.w_id, "SPAN_ID",
+               l.w_id, "PARENT_ID",
+               l.w_serv, "SERVICIO",
+               l.w_op, "OPERACION",
+               l.w_dur, "DURACION",
+               l.w_casc + 2, "CASCADA",
+               l.w_pid, "PID",
+               "ESTADO", C_RESET);
+        imprimir_separador(l.cols);
 
         for (int j = 0; j < n_spans; j++) {
             if (!impresos[j] &&
                 strcmp(spans[j].trace_id, tid) == 0 &&
                 spans[j].parent[0] == '\0') {
-                imprimir_arbol(j, impresos, 0, min_ini, total_ms, delta_real_mono);
+                imprimir_arbol(j, impresos, 0, min_ini, total_ms, delta_real_mono, &l);
             }
         }
         for (int j = 0; j < n_spans; j++) {
             if (!impresos[j] && strcmp(spans[j].trace_id, tid) == 0) {
-                imprimir_arbol(j, impresos, 1, min_ini, total_ms, delta_real_mono);
+                imprimir_arbol(j, impresos, 1, min_ini, total_ms, delta_real_mono, &l);
             }
         }
     }
@@ -313,7 +397,7 @@ static void *atender_cliente(void *arg) {
 }
 
 int main(int argc, char *argv[]) {
-    const char *sock_path = "/tmp/tracelite_op3.sock";
+    const char *sock_path = "/tmp/tracelite.sock";
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--stream") == 0) {
             modo_stream = 1;

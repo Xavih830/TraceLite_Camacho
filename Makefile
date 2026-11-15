@@ -1,15 +1,21 @@
 CC      = gcc
 CFLAGS  = -std=gnu11 -Wall -Wextra -O2 -Iinclude
+LDFLAGS = -pthread
 BIN     = bin
 COMUN   = src/common.c
 
-all: opcion2 opcion3
+all: $(BIN)/tracelite $(BIN)/collector $(BIN)/monitor_pid
 
-opcion2:
-	$(MAKE) -C opcion2_comandos all
+$(BIN)/collector: src/collector.c $(COMUN)
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $< $(COMUN) -o $@ $(LDFLAGS)
 
-opcion3:
-	$(MAKE) -C opcion3_procesos_vivos all
+$(BIN)/%: src/%.c $(COMUN)
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) $< $(COMUN) -o $@
+
+run: all
+	./$(BIN)/tracelite
 
 test:
 	@mkdir -p $(BIN)
@@ -17,7 +23,5 @@ test:
 
 clean:
 	rm -rf $(BIN)
-	$(MAKE) -C opcion2_comandos clean
-	$(MAKE) -C opcion3_procesos_vivos clean
 
-.PHONY: all opcion2 opcion3 test clean
+.PHONY: all run test clean
