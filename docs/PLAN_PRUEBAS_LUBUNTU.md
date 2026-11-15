@@ -43,12 +43,12 @@ Cada valor de la Tabla 8 sale de una línea concreta.
 
 | Fila de la Tabla 8 | De dónde sale |
 | --- | --- |
-| Distribución | Línea `Description` de `lsb_release -d` (por ejemplo, "Lubuntu 24.04 LTS") |
-| Kernel | Versión que muestra `uname -a` (el campo parecido a `6.8.0-xx-generic`) |
-| Núcleos de CPU | Número que imprime `nproc` |
-| Compilador | Primera línea de `gcc --version` |
-| Intérprete de la carga | Salida de `python3 --version` |
-| Compilación | Si `make` terminó sin errores y la línea `advertencias: 0`, junto con los flags de `CFLAGS` (el informe afirma `-Wall -Wextra`) |
+| Distribución | Línea `Description` de `lsb_release -d` (por ejemplo, "Lubuntu 24.04 LTS") | -> Ubuntu 24.04.5 LTS
+| Kernel | Versión que muestra `uname -a` (el campo parecido a `6.8.0-xx-generic`) | -> 7.0.0-43-generic
+| Núcleos de CPU | Número que imprime `nproc` | -> 16
+| Compilador | Primera línea de `gcc --version` | -> gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+| Intérprete de la carga | Salida de `python3 --version` | -> Python 3.12.3
+| Compilación | Si `make` terminó sin errores y la línea `advertencias: 0`, junto con los flags de `CFLAGS` (el informe afirma `-Wall -Wextra`) | -> Sí usa
 
 Si `CFLAGS` no incluye `-Wall -Wextra` o hay advertencias, avísame, porque cambia lo que dice la sección 6.1.
 
