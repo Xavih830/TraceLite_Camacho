@@ -82,3 +82,13 @@ core.*
 vgcore.*
 perf.data*
 
+# Informe de avance y evidencias en docs/
+docs/*INFORME*
+docs/diagramas/
+docs/pruebas/
+docs/capturas/
+docs/evidencias/
+docs/*.pdf
+docs/*.docx
+
+
