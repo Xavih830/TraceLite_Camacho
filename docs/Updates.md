@@ -296,3 +296,10 @@ Para detectar incrementos aleatorios o picos anómalos en el tiempo de ejecució
 
 ### Qué se implementó
 - Se actualizó `src/monitor_pid.c` para usar `leer_cmdline_proc()` en lugar de recortar argumentos o añadir sufijos de `wchan`/`[S]`, mostrando exactamente el mismo contenido real de `/proc/<pid>/cmdline` en la columna `OPERACION` que el modo `--resumen`.
+
+---
+
+## [2026-11-15] Actualización de `README.md` (ASD-STE100) y empaquetado de entrega
+
+### Qué se implementó
+- Se reescribió `README.md` aplicando un estilo técnico simplificado (~80% ASD-STE100): oraciones breves, voz activa, imperativos directos para compilación/ejecución, modos actualizados (instantánea y `--resumen`), detección de anomalías y referencia a `pruebas/`.
