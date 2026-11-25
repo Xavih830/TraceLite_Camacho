@@ -57,6 +57,10 @@ dkms.conf
 # Project build & output directories
 bin/
 build/
+datos/
+src/bpf/vmlinux.h
+*.bpf.o
+*.skel.h
 
 # OS & Editor files
 .DS_Store

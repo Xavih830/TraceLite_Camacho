@@ -21,6 +21,7 @@ static int es_hex_valido(const char *s, size_t largo_esperado) {
 
 int main(void) {
     /* Verificación de tamaño de span_t */
+    assert(sizeof(span_t) == 288);
     assert(sizeof(span_t) <= 512);
 
     /* Creación de span raíz */
@@ -32,6 +33,9 @@ int main(void) {
     assert(strcmp(raiz.servicio, "api") == 0);
     assert(strcmp(raiz.operacion, "POST /buy") == 0);
     assert(raiz.pid > 0);
+    assert(raiz.cpu_ms == 0.0);
+    assert(raiz.n_procs == 0);
+    assert(raiz.atribucion[0] == '\0');
 
     /* Propagación de contexto hacia span hijo */
     span_t hijo;

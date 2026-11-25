@@ -303,3 +303,151 @@ Para detectar incrementos aleatorios o picos anómalos en el tiempo de ejecució
 
 ### Qué se implementó
 - Se reescribió `README.md` aplicando un estilo técnico simplificado (~80% ASD-STE100): oraciones breves, voz activa, imperativos directos para compilación/ejecución, modos actualizados (instantánea y `--resumen`), detección de anomalías y referencia a `pruebas/`.
+
+---
+
+## [2026-11-24] Fase F0 — Base y diagnóstico
+
+### Qué se implementó
+- Se creó `CHECKLIST.md` con los requisitos `R1`–`R5`, pruebas `P1`–`P3`, `E1`, objetivos `U1`–`U11`, fases `F0`–`F10`/`G1`–`G2` y la tabla de recalibración de servicios del SO.
+- Se actualizó `Makefile` para incluir `include/*.h` como dependencia de compilación y agregar los objetivos `ebpf` y `check`.
+- Se actualizaron `include/common.h` y `src/common.c`:
+  - `id_hex()` ahora usa `getrandom()` (`<sys/random.h>`) con reintento ante `EINTR`.
+  - `escribir_exacto()` y `leer_exacto()` reintentan ante `EINTR`.
+  - Se implementaron `ruta_hermana()` (basada en `readlink("/proc/self/exe")`), `crear_dir_privado()` (`mkdtemp` en `$XDG_RUNTIME_DIR/tracelite-XXXXXX` o `/tmp/tracelite-XXXXXX`) y `validar_ruta_socket()`.
+- Se actualizaron `src/collector.c` y `src/tracelite.c` para usar rutas relativas al binario, socket privado `<dir>/spans.sock` pasado por `argv`, validación de longitud de `sun_path`, manejo de `SIGINT`/`SIGTERM` también en instantánea, espera segura ante `EINTR` (`esperar_hijo`) y limpieza del socket y directorio privado al finalizar.
+- Se corrigieron las rutas `pruebas/` → `docs/pruebas/` en `README.md`.
+- Se crearon `docs/pruebas/diagnostico_ebpf.sh`, `docs/pruebas/detectar_servicios.sh` y `docs/pruebas/prueba_base.sh`, y se ejecutaron todas las pruebas de aceptación de F0 con éxito.
+
+---
+
+## [2026-11-24] Fase F1 — Núcleo compartido
+
+### Qué se implementó
+- Se amplió `span_t` en `include/span.h` con `cpu_ms`, `n_procs` y `atribucion[12]` (288 bytes), y se actualizó `tests/test_span.c` para validar el nuevo tamaño y la inicialización en cero.
+- Se crearon `include/protocolo.h` (mensajes `ctx_t`, `resp_t`, `sol_t`, `sol_resp_t`) y `include/fuente.h` (`medida_t` y `fuente_t`).
+- Se extrajo la impresión de tablas jerárquicas y resúmenes de `src/collector.c` hacia `include/tabla.h` y `src/tabla.c`, actualizando `Makefile` para enlazar `src/tabla.c` en `bin/collector`.
+- Se verificó `make clean && make && make test` (`sizeof(span_t) = 288 bytes`) y la salida del observador sin cambios en columnas.
+
+---
+
+## [2026-11-24] Fase F2 — Solicitudes A/B con `/proc`
+
+### Qué se implementó
+- Se añadieron utilidades compartidas de Sockets UNIX con `SOCK_CLOEXEC`/`FD_CLOEXEC` y extracción de nombre base en `include/common.h` y `src/common.c` (`crear_servidor_unix`, `conectar_unix`, `aceptar_unix`, `nombre_base_cmd`).
+- Se implementó `src/fuente_proc.c` (`fuente_t` por muestreo cada 20 ms en `/proc` identificando procesos por `PID + starttime` y acumulando `cpu_ms` y `n_procs`).
+- Se implementaron `src/servicio_b.c` (`bin/servicio_b`) y `src/servicio_a.c` (`bin/servicio_a`) con barrera de inicio por `pipe2`, `setpgid` para corte por plazo, manejo de `SIGPIPE`, y recuperación ante caída de B (`servicio_b_caido`).
+- Se implementó Collector Lite en el proceso principal (`include/solicitudes.h` y `src/solicitudes.c`) y se amplió el parser de `src/tracelite.c` para soportar instantánea, `--resumen`, `-n`, `--`, `--lote`, `--plazo`, `--mostrar-salida` y rechazo con código `2` ante combinaciones inválidas, conservando el modo observación.
+- Se creó y superó `tests/test_solicitudes.sh` (7/7 comprobaciones) junto con `make clean && make && make test` sin advertencias y `docs/pruebas/prueba_base.sh`.
+
+---
+
+## [2026-11-24] Fase F3 — Persistencia y resumen
+
+### Qué se implementó
+- Se implementó el almacén diario JSONL append-only (`include/almacen.h` y `src/almacen.c`):
+  - Segmentos diarios `AAAA-MM-DD.jsonl` en `$TRACELITE_DIR` (o `$HOME/.local/share/tracelite`) con `fflush` y `fsync`, escape JSON completo y sustitución de bytes no UTF-8 por `?`.
+  - Índice en memoria (límite 100 000 spans), conteo tolerante de líneas corruptas/truncadas y retención por `--retencion-dias` (7 por defecto) / `--retencion-seg`, eliminando únicamente archivos `AAAA-MM-DD.jsonl` vencidos.
+- Se integró la persistencia en `src/solicitudes.c` (`tipo = "solicitud"`) y en `src/collector.c` (`tipo = "observacion"`), y se agregaron `--historial`, `--trace`, `--retencion-dias` y `--retencion-seg` en `src/tracelite.c`.
+- Se creó `tests/test_almacen.c` (enlazado a `make test`) y se superaron todas las pruebas de aceptación (`10` líneas válidas en la primera ejecución, `20` en la segunda y reconstrucción por `--historial --trace`).
+
+---
+
+## [2026-11-24] Fase F4 — Anomalías, alertas y pruebas obligatorias
+
+### Qué se implementó
+- Se implementó `evaluar_y_alertar_solicitud()` en `src/solicitudes.c` según la sección 4.6:
+  - Evalúa cada solicitud completa sobre `servicio_b` tomando hasta 50 referencias previas en `almacen_indice_t` (mismo `servicio`, `operacion`, `atribucion`, `tipo=solicitud`, OK y sin anomalía).
+  - Marca `latencia_alta` con `n_ref >= 3` cuando `dur > mu + 2*sigma`, `dur > 1.5*mu` y `dur - mu >= 10 ms`, e imprime la alerta inmediata `[ALERTA] servicio=... trace_id=... tipo=...` (en rojo solo si stdout es TTY) antes de persistir ambos spans en JSONL.
+  - Marca `error_proceso` y alerta sobre B (o A si B no existe) cuando `estado != 0`, actualizando el resumen final `-- Resumen: solicitudes=... spans=... alertas=... errores=... --`.
+- Se añadió `datos/` a `.gitignore` y se crearon `docs/pruebas/preparar_datos.sh` (calibrado a `normal.bin` = 16 MiB / ~401 ms y `pesado.bin` = 160 MiB), `docs/pruebas/caso_normal.sh` y `docs/pruebas/caso_anomalo.sh`, enlazados a `make check`.
+- Se superó `make check` y las 10 repeticiones consecutivas de aceptación (`10/10` con `alertas=0` en `caso_normal.sh` y `10/10` con `alertas=1` en `caso_anomalo.sh`).
+
+---
+
+## [2026-11-25] Fase F5 — eBPF para destino `programa`
+
+### Qué se implementó
+- Se generaron las firmas BTF locales y se implementaron `include/ebpf_eventos.h`, `src/bpf/trace.bpf.c` (`tp_btf/sched_process_fork`, `sched_process_exec`, `sched_process_exit`, `sched_switch`, mapas `marcados`, `cpu`, `entrada`, `eventos` `BPF_MAP_TYPE_RINGBUF` y `perdidos`) y `src/fuente_ebpf.c`.
+- Se integró `--fuente auto|ebpf|proc` en `src/servicio_b.c` (con verificación de `SO_PEERCRED` y respaldo automático a `/proc` en `auto` cuando faltan capacidades), `src/solicitudes.c` y `src/tracelite.c`.
+- Se implementó `make ebpf` en `Makefile` manteniendo `make` funcional sin dependencias eBPF.
+- Se creó `docs/pruebas/comparar_fuentes.sh` (50 hijos efímeros): `/proc` (`ventana`) registró `n_procs=1` (`cpu_ms=0.000`), mientras que `eBPF` (`exacta`) registró `n_procs=51` (`cpu_ms=7.542`, `perdidos=0`); también pasaron los casos normal (`alertas=0`) y anómalo (`alertas=1`) con `--fuente ebpf`.
+
+---
+
+## [2026-11-25] Fase F6 — Destino `backend` con `/proc` (nuevo y vivo)
+
+### Qué se implementó
+- Se creó `docs/pruebas/backend_demo.py` (`ThreadingHTTPServer` en `127.0.0.1` con rutas `/hash?mb=N`, `/espera?ms=N`, `/error`, `404` y `--mostrar-cabeceras`).
+- Se implementaron `resolver_pid_puerto_tcp()` (vía `/proc/net/tcp` y `/proc/*/fd`) y `resolver_pid_unidad()` (`systemctl show -p MainPID`) en `src/common.c`.
+- Se añadió el cliente HTTP/1.0 en `src/servicio_a.c` con envío de `traceparent: 00-<trace_id>-<span_id>-01`, lectura hasta EOF, detección de `http_>=400`, `conexion_rechazada` y `plazo_vencido`.
+- Se añadió la medición de línea base (`--linea-base`) y resta de `fondo=<ms>` en `src/servicio_b.c`.
+- Se integraron `--backend`, `--lanzar-backend`, `--backend-pid`, `--ruta`, `--linea-base` y `--unidad` en `src/solicitudes.c` y `src/tracelite.c`.
+- Se creó y superó `tests/test_backend.sh` (4/4: backend nuevo, backend vivo con preservación de PID y `traceparent`, `/error` → `http_500`, y puerto cerrado sin bloqueo).
+
+---
+
+## [2026-11-25] Fase F7 — eBPF por conexión (`backend`)
+
+### Qué se implementó
+- Se verificó `tcp_recvmsg` (`vlen=4`: `sk`, `msg`, `len`, `flags`) y los campos de `struct sock_common` (`skc_family`, `skc_daddr`, `skc_rcv_saddr`, `skc_dport`, `skc_num`) en el BTF local del kernel `7.0.0-43-generic`.
+- Se añadieron en `src/bpf/trace.bpf.c` los mapas `conexiones`, `hilos_marcados` y `ultima_act`, el programa `SEC("fexit/tcp_recvmsg")` y la propagación por `sched_process_fork` y `sched_switch` por solicitud.
+- Se añadió `iniciar_conn` a `include/fuente.h` y se implementó `ebpf_iniciar_conn()` en `src/fuente_ebpf.c` con nivel `atribucion = "conexion"`.
+- Se creó y superó `tests/test_ebpf_conexion.sh`:
+  - `/espera?ms=300` (`conexion`): `dur_ms=303.55`, `cpu_ms=1.38`.
+  - `/hash?mb=64` (`conexion`): `dur_ms=101.39`, `cpu_ms=99.09`.
+  - Prueba de ruido con cliente `curl` concurrente: `conexion` mantuvo `cpu_ms=0.49`, frente a `ventana` (`/proc`) con `cpu_ms=220.00`.
+
+---
+
+## [2026-11-25] Fase F8 — Destino `app` (viva y nueva) y servicios existentes del SO
+
+### Qué se implementó
+- Se añadió `resolver_pid_nombre_proceso()` en `src/common.c` y soporte completo para destino `app` (`--app NOMBRE|PID`, `--lanzar-app`, `--fin orden|inactividad`) en `src/servicio_a.c`, `src/servicio_b.c`, `src/solicitudes.c` y `src/tracelite.c`.
+- Se implementó la detección de reposo en `src/servicio_b.c` (3 ventanas seguidas de 100 ms con delta de CPU `<= tasa_base * 100 ms + 2 ms`, anotando `sin_reposo` si vence el plazo).
+- Se creó y ejecutó `docs/pruebas/demo_servicios_so.sh`:
+  - `cups.service` (`PID 7280`): `5` solicitudes (`GET /`), `10` spans, `0` errores.
+  - `systemd-resolved.service` (`PID 788`): `5` solicitudes (`resolvectl query localhost`), `10` spans, `0` errores.
+- Se verificó también `app` viva preservando su PID con atribución `ventana` y `fondo=` en JSONL.
+
+---
+
+## [2026-11-25] Fase F9 — Modos, niveles de tiempo y lotes
+
+### Qué se implementó
+- Se añadieron los modos `--modo respuesta|estabilidad|escalado|fallo` y los niveles `--tiempo normal|alto|muy-alto` en `include/solicitudes.h`, `src/solicitudes.c` y `src/tracelite.c`:
+  - `respuesta`: `--slo-ms` (por defecto 200 ms en `app`, 1000 ms en `programa`/`backend`), alerta `slo_excedido` y clase de latencia (`instantanea`, `fluida`, `atencion`, `excedida`) en `msg` de A.
+  - `estabilidad`: calibración previa no persistida, evaluación al cierre del lote por `modo`, `destino` y `atribucion`.
+  - `escalado`: `--entradas`, `--tamanos` (por defecto `1,2,4,8,16`) y detección de `escalado_no_lineal` (`ratio > 1.5 * mediana` con diferencia `>= 10 ms`).
+  - `fallo`: `--fallo-en N` con inyección de entrada inválida de lectura (`error_proceso`).
+- Se creó `docs/pruebas/matriz_modos.sh` y el objetivo `make check-modos` en `Makefile`, superando los 5 casos (observando en equipo de 16 núcleos que tamaños muy pequeños como `mb=8`/`mb=16` muestran varianza inicial frente a la sobrecarga fija de ~20 ms, por lo que `matriz_modos.sh` usa `mb=64` en estabilidad y `mb=32..512` en escalado sin alterar los umbrales).
+
+---
+
+## [2026-11-25] Fase F10 — Documentación final
+
+### Qué se implementó
+- Se verificaron [S3] (`BatchSpanProcessor` `scheduleDelayMillis = 5000 ms` en OpenTelemetry) y [S7] (`traceparent` en W3C Trace Context).
+- Se actualizó `README.md` con instrucciones de compilación (`make`, `make ebpf`), `setcap`, formas, destinos, modos, niveles de tiempo, `span_t` (288 bytes) y limitaciones.
+- Se crearon `docs/diagramas/arquitectura_ipc.md`, `docs/INFORME_FINAL_TRACELITE.md` y `docs/GUION_VIDEO.md`, y se completó `CHECKLIST.md` marcando `F10` y `E1`.
+
+
+---
+
+## [2026-11-25] Fase G1 — Interfaz gráfica base (`tracelite-gui`)
+
+### Qué se implementó
+- Se agregó el objetivo `gui` en `Makefile` usando `pkg-config --cflags --libs gtk4`, manteniendo `make` independiente de GTK.
+- Se creó `src/gui.c` con el visor GTK 4 + Cairo de solo lectura (`almacen_cargar` con retención `0, 0`), monitoreo en vivo con `GFileMonitor`, filtros (texto/Trace ID, estado, modo, solo alertas), cascada de spans en Cairo, detalle de span con significado de `atribucion` y pestaña de alertas.
+- Se verificó compilación sin advertencias (`-Wall -Wextra`) y tolerancia a directorio vacío, líneas JSONL truncadas/corruptas y recarga en vivo sin modificar los archivos.
+
+
+---
+
+## [2026-11-25] Fase G2 — Interfaz gráfica completa (`tracelite-gui`)
+
+### Qué se implementó
+- Se creó `include/gui_form.h` y `src/gui_form.c` con la tabla estática en C (`TABLA_CAMPOS`) de controles `GtkDropDown`, `GtkSpinButton` y `GtkEntry`, visibilidad dinámica según forma (`Observación`, `Instantánea`, `Resumen`), destino (`programa`, `backend`, `app`), modo (`respuesta`, `estabilidad`, `escalado`, `fallo`) y tiempo (`normal`, `alto`, `muy-alto`, oculto en observación).
+- Se implementó `gui_form_construir_argv` y `gui_form_formatear_preview` para construir un arreglo literal de argumentos (`argv[]`, nunca shell) y mostrar el comando resultante en vivo.
+- Se integró el formulario en `src/gui.c` mediante `GSubprocess` (`g_subprocess_newv`), lectura asíncrona de salida estándar/error en un `GtkTextView`, botón **Detener** (`SIGINT` solo al `tracelite` lanzado por la interfaz), bloqueo de ejecuciones simultáneas, diálogo de confirmación al cerrar durante una ejecución y tabla de procesos en el detalle para `tipo = observacion`.
+- Se verificó compilación sin advertencias (`make && make test && make gui`), prueba unitaria de `gui_form_construir_argv`, paso literal de `; touch /tmp/tl_g2_inject` sin inyección de shell, preservación de PID de proceso vivo tras `SIGINT` a `tracelite` y arranque limpio de `bin/tracelite-gui`.

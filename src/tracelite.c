@@ -1,7 +1,11 @@
+#include "almacen.h"
 #include "common.h"
+#include "solicitudes.h"
 
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +49,42 @@ static volatile sig_atomic_t detener_captura = 0;
 static void manejar_senal(int sig) {
     (void)sig;
     detener_captura = 1;
+}
+
+static void instalar_manejador_senales(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = manejar_senal;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+static void esperar_hijo(pid_t pid) {
+    int st = 0;
+    if (pid <= 0) {
+        return;
+    }
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+    }
+}
+
+static int conectar_colector(const char *sock_path);
+
+static void cerrar_colector(pid_t pid_col, const char *sock_path, const span_t *raiz) {
+    int sock_fd = conectar_colector(sock_path);
+    if (sock_fd >= 0) {
+        if (raiz != NULL) {
+            escribir_exacto(sock_fd, raiz, sizeof(span_t));
+        }
+        span_t fin;
+        memset(&fin, 0, sizeof(fin));
+        snprintf(fin.servicio, sizeof(fin.servicio), "__FIN__");
+        escribir_exacto(sock_fd, &fin, sizeof(span_t));
+        close(sock_fd);
+    } else if (pid_col > 0) {
+        kill(pid_col, SIGTERM);
+    }
+    esperar_hijo(pid_col);
 }
 
 typedef struct {
@@ -218,18 +258,25 @@ static int buscar_pid_por_nombre(const proc_info_t *lista, int n, const char *no
 }
 
 static void imprimir_ayuda(const char *prog) {
-    printf("Uso: %s [PID | NOMBRE] [opciones]\n\n", prog);
+    printf("Uso:\n");
+    printf("  Observación: %s [PID | NOMBRE] [-r] [-d SEG] [--interval MS]\n", prog);
+    printf("  Solicitudes: %s [--resumen] [-n N] [--plazo SEG] [--mostrar-salida] -- <comando...>\n", prog);
+    printf("               %s --resumen --lote <archivo> [--plazo SEG]\n\n", prog);
     printf("Opciones:\n");
-    printf("  -r, --resumen          Captura continua (60 s por defecto) con tabla consolidada\n");
-    printf("  -d, --duracion <seg>   Duracion en segundos para --resumen (0 = manual con Ctrl+C)\n");
-    printf("  --interval <ms>        Intervalo de muestreo en ms (por defecto 150)\n");
+    printf("  -r, --resumen          En observación: captura continua (60 s); en solicitudes: serie de 5\n");
+    printf("  -d, --duracion <seg>   Duración en segundos para observación --resumen (0 = Ctrl+C)\n");
+    printf("  --interval <ms>        Intervalo de muestreo en ms (solo observación, por defecto 150)\n");
+    printf("  -n <N>                 Número de solicitudes (5 por defecto, solo con --resumen)\n");
+    printf("  --plazo <seg>          Plazo máximo por solicitud en segundos (por defecto 60)\n");
+    printf("  --lote <archivo>       Archivo con una solicitud por línea (solo con --resumen)\n");
+    printf("  --fuente <auto|proc>   Fuente de observación (por defecto auto)\n");
+    printf("  --mostrar-salida       Muestra stdout/stderr del programa ejecutado\n");
     printf("  -h, --help             Muestra esta ayuda y ejemplos\n\n");
-    printf("Ejemplos intuitivos por nombre:\n");
+    printf("Ejemplos:\n");
     printf("  %s antigravity\n", prog);
     printf("  %s --resumen -d 30 antigravity\n", prog);
-    printf("  %s --resumen -d 20 chrome\n", prog);
-    printf("  %s --resumen -d 20 firefox\n", prog);
-    printf("  %s postgres\n", prog);
+    printf("  %s -- sha256sum README.md\n", prog);
+    printf("  %s --resumen -n 5 -- sha256sum README.md\n", prog);
 }
 
 /* Selección automática de PID raíz con mayor jerarquía de hijos */
@@ -329,13 +376,8 @@ static void recolectar_subarbol_proc(const proc_info_t *lista, int n_procs,
 }
 
 static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
+                                 const char *ruta_col,
                                  int interval_ms, int duracion_seg) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = manejar_senal;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-
     fflush(stdout);
     pid_t pid_col = fork();
     if (pid_col < 0) {
@@ -344,9 +386,9 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
     }
     if (pid_col == 0) {
         signal(SIGINT, SIG_IGN);
-        char *args_col[3] = { "./bin/collector", (char *)sock_path, NULL };
-        execv("./bin/collector", args_col);
-        perror("execv collector_sock");
+        char *args_col[3] = { (char *)ruta_col, (char *)sock_path, NULL };
+        execv(ruta_col, args_col);
+        perror("execv collector");
         _exit(127);
     }
 
@@ -369,7 +411,7 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
         free(lista);
         free(hist);
         free(subarbol);
-        waitpid(pid_col, NULL, 0);
+        cerrar_colector(pid_col, sock_path, NULL);
         return 1;
     }
 
@@ -457,72 +499,332 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
 
     span_fin(&raiz, (n_hist == 0) ? 1 : 0, (n_hist == 0) ? "pid_no_encontrado" : "", "");
 
-    int sock_fd = conectar_colector(sock_path);
-    if (sock_fd >= 0) {
-        escribir_exacto(sock_fd, &raiz, sizeof(span_t));
-
-        for (int i = 0; i < n_hist; i++) {
-            span_t s;
-            char op[48];
-            snprintf(op, sizeof(op), "%.47s", hist[i].cmdline);
-
-            span_ini(&s, raiz.trace_id, hist[i].parent_span_id, hist[i].comm, op);
-            snprintf(s.span_id, sizeof(s.span_id), "%s", hist[i].span_id);
-            s.pid = hist[i].pid;
-            span_fin(&s, 0, "", "");
-            s.ini = hist[i].ini_ns;
-            s.fin = hist[i].fin_ns;
-            s.dur = (double)(hist[i].fin_ns - hist[i].ini_ns) / 1000000.0;
-            escribir_exacto(sock_fd, &s, sizeof(span_t));
-        }
-
-        span_t fin;
-        memset(&fin, 0, sizeof(fin));
-        snprintf(fin.servicio, sizeof(fin.servicio), "__FIN__");
-        escribir_exacto(sock_fd, &fin, sizeof(span_t));
-        close(sock_fd);
-    }
+    cerrar_colector(pid_col, sock_path, &raiz);
 
     free(lista);
     free(hist);
     free(subarbol);
-    waitpid(pid_col, NULL, 0);
     return 0;
 }
 
 int main(int argc, char *argv[]) {
-    const char *sock_path = "/tmp/tracelite.sock";
     int modo_resumen = 0;
     int interval_ms = 150;
+    int interval_set = 0;
     int duracion_seg = -1;
     int pid_arg = -1;
     const char *nombre_arg = NULL;
 
+    int n_sol = -1;
+    int plazo_s = 60;
+    int plazo_set = 0;
+    int mostrar_salida = 0;
+    const char *lote_path = NULL;
+    const char *fuente = "auto";
+    int idx_cmd = -1;
+    int modo_historial = 0;
+    const char *trace_filtro = NULL;
+    int ret_dias = 7;
+    int ret_seg = 0;
+    const char *backend_addr = NULL;
+    const char *lanzar_backend = NULL;
+    int backend_pid = 0;
+    const char *ruta_http = "/";
+    const char *unidad = NULL;
+    int linea_base_s = 5;
+    const char *app_target = NULL;
+    const char *lanzar_app = NULL;
+    int fin_por_orden = 0;
+    const char *modo_str = NULL;
+    const char *tiempo_str = NULL;
+    double slo_ms = 0.0;
+    const char *entradas = NULL;
+    const char *tamanos = NULL;
+    int fallo_en = 5;
+
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+        if (strcmp(argv[i], "--") == 0) {
+            idx_cmd = i + 1;
+            break;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             imprimir_ayuda(argv[0]);
             return 0;
+        } else if (strcmp(argv[i], "--historial") == 0) {
+            modo_historial = 1;
+        } else if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
+            trace_filtro = argv[++i];
+        } else if (strcmp(argv[i], "--retencion-dias") == 0 && i + 1 < argc) {
+            ret_dias = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--retencion-seg") == 0 && i + 1 < argc) {
+            ret_seg = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
+            backend_addr = argv[++i];
+        } else if (strcmp(argv[i], "--lanzar-backend") == 0 && i + 1 < argc) {
+            lanzar_backend = argv[++i];
+        } else if (strcmp(argv[i], "--backend-pid") == 0 && i + 1 < argc) {
+            backend_pid = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--ruta") == 0 && i + 1 < argc) {
+            ruta_http = argv[++i];
+        } else if (strcmp(argv[i], "--unidad") == 0 && i + 1 < argc) {
+            unidad = argv[++i];
+        } else if (strcmp(argv[i], "--linea-base") == 0 && i + 1 < argc) {
+            linea_base_s = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--app") == 0 && i + 1 < argc) {
+            app_target = argv[++i];
+        } else if (strcmp(argv[i], "--lanzar-app") == 0 && i + 1 < argc) {
+            lanzar_app = argv[++i];
+        } else if (strcmp(argv[i], "--fin") == 0 && i + 1 < argc) {
+            const char *fv = argv[++i];
+            if (strcmp(fv, "orden") == 0) fin_por_orden = 1;
+            else if (strcmp(fv, "inactividad") == 0) fin_por_orden = 0;
+            else {
+                fprintf(stderr, "[tracelite] --fin inválido: %s (usa orden|inactividad)\n", fv);
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--modo") == 0 && i + 1 < argc) {
+            modo_str = argv[++i];
+        } else if (strcmp(argv[i], "--tiempo") == 0 && i + 1 < argc) {
+            tiempo_str = argv[++i];
+        } else if (strcmp(argv[i], "--slo-ms") == 0 && i + 1 < argc) {
+            slo_ms = atof(argv[++i]);
+        } else if (strcmp(argv[i], "--entradas") == 0 && i + 1 < argc) {
+            entradas = argv[++i];
+        } else if (strcmp(argv[i], "--tamanos") == 0 && i + 1 < argc) {
+            tamanos = argv[++i];
+        } else if (strcmp(argv[i], "--fallo-en") == 0 && i + 1 < argc) {
+            fallo_en = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--resumen") == 0 || strcmp(argv[i], "-r") == 0) {
             modo_resumen = 1;
         } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
             interval_ms = atoi(argv[++i]);
             if (interval_ms < 50) interval_ms = 50;
+            interval_set = 1;
         } else if ((strcmp(argv[i], "--duracion") == 0 || strcmp(argv[i], "-d") == 0) && i + 1 < argc) {
             duracion_seg = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
+            n_sol = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--plazo") == 0 && i + 1 < argc) {
+            plazo_s = atoi(argv[++i]);
+            plazo_set = 1;
+        } else if (strcmp(argv[i], "--lote") == 0 && i + 1 < argc) {
+            lote_path = argv[++i];
+        } else if (strcmp(argv[i], "--fuente") == 0 && i + 1 < argc) {
+            fuente = argv[++i];
+        } else if (strcmp(argv[i], "--mostrar-salida") == 0) {
+            mostrar_salida = 1;
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "[tracelite] Opción desconocida o incompleta: %s\n", argv[i]);
+            return 2;
         } else if (es_numerico(argv[i])) {
             pid_arg = atoi(argv[i]);
-        } else if (argv[i][0] != '-') {
+        } else {
             nombre_arg = argv[i];
         }
     }
 
+    if (modo_historial) {
+        almacen_indice_t alm;
+        if (almacen_cargar(&alm, NULL, ret_dias, ret_seg) != 0) {
+            fprintf(stderr, "[tracelite] No se pudo abrir el almacén de historial.\n");
+            return 1;
+        }
+        int rc = almacen_mostrar_historial(&alm, trace_filtro);
+        almacen_liberar(&alm);
+        return rc;
+    }
+
+    int es_backend_dest = (backend_addr != NULL || lanzar_backend != NULL);
+    int es_app_dest = (app_target != NULL || lanzar_app != NULL);
+    int es_solicitud = (idx_cmd >= 0 || lote_path != NULL || es_backend_dest || es_app_dest);
+    int tiene_opc_sol = (n_sol >= 0 || plazo_set || mostrar_salida ||
+                         strcmp(fuente, "auto") != 0 || modo_str != NULL || tiempo_str != NULL);
+
+    modo_t modo = modo_resumen ? MODO_ESTABILIDAD : MODO_RESPUESTA;
+    if (modo_str != NULL) {
+        if (strcmp(modo_str, "respuesta") == 0) modo = MODO_RESPUESTA;
+        else if (strcmp(modo_str, "estabilidad") == 0) modo = MODO_ESTABILIDAD;
+        else if (strcmp(modo_str, "escalado") == 0) modo = MODO_ESCALADO;
+        else if (strcmp(modo_str, "fallo") == 0) modo = MODO_FALLO;
+        else {
+            fprintf(stderr, "[tracelite] --modo inválido: %s\n", modo_str);
+            return 2;
+        }
+    }
+
+    tiempo_nivel_t tnivel = TIEMPO_NORMAL;
+    int factor_t = 1;
+    if (tiempo_str != NULL) {
+        if (plazo_set) {
+            fprintf(stderr, "[tracelite] --tiempo es incompatible con --plazo.\n");
+            return 2;
+        }
+        if (strcmp(tiempo_str, "normal") == 0) { tnivel = TIEMPO_NORMAL; factor_t = 1; }
+        else if (strcmp(tiempo_str, "alto") == 0) { tnivel = TIEMPO_ALTO; factor_t = 3; }
+        else if (strcmp(tiempo_str, "muy-alto") == 0) { tnivel = TIEMPO_MUY_ALTO; factor_t = 6; }
+        else {
+            fprintf(stderr, "[tracelite] --tiempo inválido: %s\n", tiempo_str);
+            return 2;
+        }
+    } else if (plazo_set) {
+        tnivel = TIEMPO_MANUAL;
+    }
+
+    if (es_solicitud) {
+        if (!modo_resumen && (modo == MODO_ESCALADO || modo == MODO_FALLO)) {
+            fprintf(stderr, "[tracelite] --modo escalado y --modo fallo exigen --resumen.\n");
+            return 2;
+        }
+        if (pid_arg > 0 || nombre_arg != NULL) {
+            fprintf(stderr, "[tracelite] Las opciones de solicitud no se combinan con PID o nombre.\n");
+            return 2;
+        }
+        if (es_backend_dest && (idx_cmd >= 0 || es_app_dest)) {
+            fprintf(stderr, "[tracelite] Solo un destino por ejecución (no combines --backend con -- o --app).\n");
+            return 2;
+        }
+        if (es_app_dest && idx_cmd < 0) {
+            fprintf(stderr, "[tracelite] Destino --app/--lanzar-app requiere -- <orden>.\n");
+            return 2;
+        }
+        if (app_target != NULL && lanzar_app != NULL) {
+            fprintf(stderr, "[tracelite] No combines --app con --lanzar-app.\n");
+            return 2;
+        }
+        if (backend_addr != NULL && lanzar_backend != NULL) {
+            fprintf(stderr, "[tracelite] No combines --backend con --lanzar-backend.\n");
+            return 2;
+        }
+        if (duracion_seg >= 0 || interval_set) {
+            fprintf(stderr, "[tracelite] -d e --interval solo aplican en modo observación.\n");
+            return 2;
+        }
+        if (lote_path != NULL && !modo_resumen) {
+            fprintf(stderr, "[tracelite] --lote exige --resumen.\n");
+            return 2;
+        }
+        if (lote_path != NULL && idx_cmd >= 0) {
+            fprintf(stderr, "[tracelite] --lote no se combina con -- <comando>.\n");
+            return 2;
+        }
+        if (n_sol >= 0 && !modo_resumen) {
+            fprintf(stderr, "[tracelite] -n solo aplica con --resumen.\n");
+            return 2;
+        }
+        if (idx_cmd >= 0 && idx_cmd >= argc) {
+            fprintf(stderr, "[tracelite] Falta el comando después de --.\n");
+            return 2;
+        }
+        if (strcmp(fuente, "auto") != 0 && strcmp(fuente, "ebpf") != 0 &&
+            strcmp(fuente, "proc") != 0) {
+            fprintf(stderr, "[tracelite] --fuente inválida: %s (usa auto|ebpf|proc)\n", fuente);
+            return 2;
+        }
+        if (plazo_s <= 0) {
+            fprintf(stderr, "[tracelite] --plazo debe ser mayor que 0.\n");
+            return 2;
+        }
+    } else if (tiene_opc_sol) {
+        fprintf(stderr, "[tracelite] Opciones de solicitud requieren -- <comando> o --lote.\n");
+        return 2;
+    }
+
+    char dir_priv[PATH_MAX];
+    char sock_path[PATH_MAX];
+    if (crear_dir_privado(dir_priv, sizeof(dir_priv)) != 0) {
+        return 1;
+    }
+    int n_sock = snprintf(sock_path, sizeof(sock_path), "%s/spans.sock", dir_priv);
+    if (n_sock < 0 || (size_t)n_sock >= sizeof(sock_path) || validar_ruta_socket(sock_path) != 0) {
+        rmdir(dir_priv);
+        return 1;
+    }
+
+    instalar_manejador_senales();
+
+    if (es_solicitud) {
+        char cmd_linea[512] = "";
+        if (idx_cmd >= 0) {
+            size_t pos = 0;
+            for (int i = idx_cmd; i < argc && pos + 2 < sizeof(cmd_linea); i++) {
+                int w = snprintf(cmd_linea + pos, sizeof(cmd_linea) - pos,
+                                 "%s%s", (i == idx_cmd) ? "" : " ", argv[i]);
+                if (w > 0) pos += (size_t)w;
+            }
+        }
+        solicitudes_cfg_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.resumen = modo_resumen;
+        cfg.n_solicitudes = (n_sol > 0) ? n_sol : (modo_resumen ? 5 : 1);
+        if (plazo_set) {
+            cfg.plazo_s = plazo_s;
+        } else if (modo == MODO_ESCALADO) {
+            cfg.plazo_s = 30 * factor_t;
+        } else if (modo == MODO_ESTABILIDAD) {
+            cfg.plazo_s = 60 * factor_t;
+        } else {
+            cfg.plazo_s = 10 * factor_t;
+        }
+        cfg.mostrar_salida = mostrar_salida;
+        cfg.lote_path = lote_path;
+        cfg.cmd_linea = cmd_linea;
+        cfg.fuente = fuente;
+        cfg.ret_dias = ret_dias;
+        cfg.ret_seg = ret_seg;
+        cfg.destino = es_backend_dest ? DEST_BACKEND : (es_app_dest ? DEST_APP : DEST_PROGRAMA);
+        cfg.lanzar_backend = lanzar_backend;
+        cfg.backend_pid = backend_pid;
+        cfg.ruta_http = ruta_http;
+        cfg.unidad = unidad;
+        cfg.linea_base_s = (linea_base_s >= 0) ? linea_base_s : 5;
+        cfg.app_target = app_target;
+        cfg.lanzar_app = lanzar_app;
+        cfg.fin_por_orden = fin_por_orden;
+        cfg.modo = modo;
+        cfg.tiempo_nivel = tnivel;
+        cfg.slo_ms = slo_ms;
+        cfg.entradas = entradas;
+        cfg.tamanos = tamanos;
+        cfg.fallo_en = fallo_en;
+
+        char bhost[64] = "127.0.0.1";
+        int bpuerto = 8000;
+        if (backend_addr != NULL) {
+            const char *colon = strchr(backend_addr, ':');
+            if (colon != NULL) {
+                size_t hl = (size_t)(colon - backend_addr);
+                if (hl > 0 && hl < sizeof(bhost)) {
+                    memcpy(bhost, backend_addr, hl);
+                    bhost[hl] = '\0';
+                }
+                bpuerto = atoi(colon + 1);
+            } else {
+                snprintf(bhost, sizeof(bhost), "%s", backend_addr);
+            }
+        } else if (lanzar_backend != NULL) {
+            const char *sp = strrchr(lanzar_backend, ' ');
+            if (sp != NULL && atoi(sp + 1) > 0) {
+                bpuerto = atoi(sp + 1);
+            }
+        }
+        cfg.backend_host = bhost;
+        cfg.backend_puerto = bpuerto;
+
+        int rc = ejecutar_solicitudes(&cfg, dir_priv, sock_path, &detener_captura);
+        rmdir(dir_priv);
+        return rc;
+    }
+
     proc_info_t *lista = (proc_info_t *)malloc(sizeof(proc_info_t) * MAX_PROCS_SO);
-    if (lista == NULL) return 1;
+    if (lista == NULL) {
+        rmdir(dir_priv);
+        return 1;
+    }
 
     int n_procs = cargar_procesos_so(lista, MAX_PROCS_SO, (int)getpid());
     if (n_procs == 0) {
         fprintf(stderr, "[tracelite] No se encontraron procesos accesibles en /proc.\n");
         free(lista);
+        rmdir(dir_priv);
         return 1;
     }
 
@@ -536,6 +838,7 @@ int main(int argc, char *argv[]) {
         } else if (modo_resumen) {
             fprintf(stderr, "[tracelite] No se encontró ningún proceso activo para '%s'.\n", nombre_arg);
             free(lista);
+            rmdir(dir_priv);
             return 1;
         }
     } else {
@@ -545,6 +848,17 @@ int main(int argc, char *argv[]) {
     if (pid_raiz <= 0 && nombre_arg == NULL) {
         fprintf(stderr, "[tracelite] PID raíz inválido.\n");
         free(lista);
+        rmdir(dir_priv);
+        return 1;
+    }
+
+    char ruta_col[PATH_MAX];
+    char ruta_mon[PATH_MAX];
+    if (ruta_hermana("collector", ruta_col, sizeof(ruta_col)) != 0 ||
+        ruta_hermana("monitor_pid", ruta_mon, sizeof(ruta_mon)) != 0) {
+        fprintf(stderr, "[tracelite] No se pudieron resolver rutas de binarios hermanos.\n");
+        free(lista);
+        rmdir(dir_priv);
         return 1;
     }
 
@@ -553,22 +867,26 @@ int main(int argc, char *argv[]) {
         if (duracion_seg < 0) {
             duracion_seg = 60;
         }
-        return ejecutar_modo_resumen(pid_raiz, sock_path, interval_ms, duracion_seg);
+        int rc = ejecutar_modo_resumen(pid_raiz, sock_path, ruta_col, interval_ms, duracion_seg);
+        unlink(sock_path);
+        rmdir(dir_priv);
+        return rc;
     }
 
-    /* 1. Lanzar collector_sock con fork() + execv() */
+    /* 1. Lanzar collector con fork() + execv() */
     fflush(stdout);
     pid_t pid_col = fork();
     if (pid_col < 0) {
         perror("fork collector");
+        rmdir(dir_priv);
         free(lista);
         return 1;
     }
     if (pid_col == 0) {
         signal(SIGINT, SIG_IGN);
-        char *args_col[3] = { "./bin/collector", (char *)sock_path, NULL };
-        execv("./bin/collector", args_col);
-        perror("execv collector_sock");
+        char *args_col[3] = { ruta_col, sock_path, NULL };
+        execv(ruta_col, args_col);
+        perror("execv collector");
         _exit(127);
     }
 
@@ -601,23 +919,26 @@ int main(int argc, char *argv[]) {
 
     /* 3. Lanzar un monitor_pid en paralelo por cada proceso del árbol */
     pid_t hijos[MAX_NODOS];
-    for (int i = 0; i < n_nodos; i++) {
+    for (int i = 0; i < MAX_NODOS; i++) {
+        hijos[i] = -1;
+    }
+    for (int i = 0; i < n_nodos && !detener_captura; i++) {
         fflush(stdout);
         hijos[i] = fork();
         if (hijos[i] == 0) {
             char pid_str[16];
             snprintf(pid_str, sizeof(pid_str), "%d", nodos[i].pid);
             char *args_mon[8] = {
-                "./bin/monitor_pid",
+                ruta_mon,
                 pid_str,
                 raiz.trace_id,
                 nodos[i].span_id,
                 nodos[i].parent_span_id,
-                (char *)sock_path,
+                sock_path,
                 "250",
                 NULL
             };
-            execv("./bin/monitor_pid", args_mon);
+            execv(ruta_mon, args_mon);
             perror("execv monitor_pid");
             _exit(127);
         }
@@ -625,7 +946,7 @@ int main(int argc, char *argv[]) {
 
     for (int i = 0; i < n_nodos; i++) {
         if (hijos[i] > 0) {
-            waitpid(hijos[i], NULL, 0);
+            esperar_hijo(hijos[i]);
         }
     }
 
@@ -633,17 +954,8 @@ int main(int argc, char *argv[]) {
         span_fin(&raiz, 0, "", "");
     }
 
-    int sock_fd = conectar_colector(sock_path);
-    if (sock_fd >= 0) {
-        escribir_exacto(sock_fd, &raiz, sizeof(span_t));
-
-        span_t fin;
-        memset(&fin, 0, sizeof(fin));
-        snprintf(fin.servicio, sizeof(fin.servicio), "__FIN__");
-        escribir_exacto(sock_fd, &fin, sizeof(span_t));
-        close(sock_fd);
-    }
-
-    waitpid(pid_col, NULL, 0);
+    cerrar_colector(pid_col, sock_path, &raiz);
+    unlink(sock_path);
+    rmdir(dir_priv);
     return 0;
 }

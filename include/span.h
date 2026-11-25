@@ -17,6 +17,9 @@ typedef struct {
     char    msg[64];            
     char    anomalia[24];       
     int     pid;
+    double  cpu_ms;
+    int     n_procs;
+    char    atribucion[12];
 } span_t;
 
 #endif /* SPAN_H */

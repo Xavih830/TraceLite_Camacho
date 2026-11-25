@@ -1,105 +1,91 @@
 # TraceLite
 
-TraceLite observa árboles reales de procesos en GNU/Linux. El sistema usa `/proc`, `fork()`, `execv()`, Sockets UNIX (`AF_UNIX`) e hilos (`pthread`).
+TraceLite es una herramienta de trazabilidad distribuida y observación de procesos reales en GNU/Linux. Implementa una arquitectura maestro-servicios (`tracelite` como Collector Lite, `servicio_a` como entrega y `servicio_b` como observador) comunicados por Sockets UNIX (`AF_UNIX`), hilos (`pthread`), persistencia diaria JSONL y seguimiento en kernel mediante eBPF CO-RE (con respaldo automático en `/proc`).
 
 ---
 
 ## 1. Estructura del proyecto
 
-- `Makefile`: automatiza la compilación y las pruebas.
-- `README.md`: describe la compilación y el uso.
-- `include/span.h`: define la estructura `span_t` (264 bytes).
-- `include/common.h`: declara utilidades comunes de tiempo, IDs y E/S.
-- `src/common.c`: implementa las utilidades comunes.
-- `src/tracelite.c`: descubre procesos en `/proc` y coordina la captura.
-- `src/monitor_pid.c`: observa un PID en `/proc` y envía su span al colector.
-- `src/collector.c`: recibe spans por Socket UNIX, detecta anomalías e imprime la tabla.
-- `tests/test_span.c`: verifica `span_t` y la lectura/escritura exacta.
-- `pruebas/`: contiene scripts de carga y anomalías (`carga_np.sh`, `servicio_efimero.sh`, `tsp_np.py`).
+- `Makefile`: compila los binarios base (`make`), soporte eBPF (`make ebpf`) y pruebas (`make test`, `make check`, `make check-modos`).
+- `include/span.h`: define `span_t` (**288 bytes**).
+- `include/protocolo.h`, `include/fuente.h`, `include/almacen.h`, `include/tabla.h`, `include/solicitudes.h`, `include/ebpf_eventos.h`, `include/common.h`: contratos e interfaces compartidas.
+- `src/tracelite.c`: punto de entrada, parser CLI, modo observación e inicio de Collector Lite.
+- `src/solicitudes.c`: Collector Lite en el proceso principal, evaluación de anomalías/modos y persistencia.
+- `src/servicio_a.c`: ejecuta programas con barrera (`pipe2`) o envía peticiones HTTP/1.0 con `traceparent`.
+- `src/servicio_b.c`: observa mediante `fuente_ebpf` o `fuente_proc` y calcula línea base.
+- `src/bpf/trace.bpf.c` y `src/fuente_ebpf.c`: trazado en kernel (`tp_btf/sched_*` y `fexit/tcp_recvmsg`) con `BPF_MAP_TYPE_RINGBUF`.
+- `src/fuente_proc.c`: muestreo periódico cada 20 ms en `/proc` por `PID + starttime`.
+- `src/almacen.c`: almacenamiento JSONL append-only por día (`AAAA-MM-DD.jsonl`) con retención de 7 días.
+- `src/collector.c`, `src/monitor_pid.c`, `src/tabla.c`, `src/common.c`: modo observación e impresión jerárquica.
+- `docs/pruebas/`: scripts de calibración, diagnóstico eBPF, servicios del SO y matriz de pruebas.
 
 ---
 
-## 2. Requisitos
+## 2. Compilación e instalación
 
-- Sistema operativo GNU/Linux (nativo o WSL2).
-- Compilador `gcc` con soporte `pthread` y `libm`.
-- Herramienta `make`.
+### Compilación estándar (sin dependencias eBPF)
+```bash
+make
+make test
+```
 
----
-
-## 3. Compilar y probar
-
-1. Abre una terminal en la raíz del proyecto.
-2. Compila los binarios:
-   ```bash
-   make
-   ```
-3. Ejecuta las pruebas unitarias:
-   ```bash
-   make test
-   ```
-4. Limpia los binarios generados cuando sea necesario:
-   ```bash
-   make clean
-   ```
+### Compilación con eBPF CO-RE (Ubuntu/Lubuntu 24.04+)
+Instala `clang`, `llvm`, `libbpf-dev`, `libelf-dev`, `zlib1g-dev` y `bpftool`, compila eBPF y otorga capacidades **únicamente** a `bin/servicio_b`:
+```bash
+make ebpf
+sudo setcap cap_bpf,cap_perfmon=ep bin/servicio_b
+getcap bin/servicio_b
+```
+*(Repite `setcap` tras cada recompilación de `bin/servicio_b`. Nunca ejecutes `tracelite` ni apps observadas con `sudo`.)*
 
 ---
 
-## 4. Ejecutar TraceLite
+## 3. Modos de uso
 
-### Modo instantánea (predeterminado)
+### Observación (sin solicitudes)
+```bash
+./bin/tracelite [PID | NOMBRE]
+./bin/tracelite --resumen -d 30 --interval 150 antigravity
+```
 
-Captura el subárbol actual de un proceso. Lanza un proceso `monitor_pid` en paralelo por cada nodo mediante `fork()` y `execv()`.
-
-- Selecciona un árbol automáticamente:
+### Solicitudes: Formas, Destinos, Modos y Niveles de tiempo
+- **Formas:** instantánea (1 solicitud, por defecto) o `--resumen` (5 solicitudes o `-n N`).
+- **Destinos:**
+  - `programa` (nuevo): `./bin/tracelite --resumen -- gzip -kfc datos/normal.bin`
+  - `backend` (vivo o nuevo):
+    ```bash
+    ./bin/tracelite --resumen --modo respuesta --backend 127.0.0.1:8000 --ruta "/hash?mb=8"
+    ./bin/tracelite --resumen --lanzar-backend "python3 docs/pruebas/backend_demo.py 8000" --ruta "/hash?mb=8"
+    ```
+  - `app` (viva o nueva):
+    ```bash
+    ./bin/tracelite --resumen --modo respuesta --app firefox -- firefox --new-tab https://example.com
+    ./bin/tracelite --resumen --app systemd-resolved --unidad systemd-resolved.service --fin orden -- resolvectl query localhost
+    ```
+- **Modos (`--modo`):** `respuesta` (`--slo-ms`), `estabilidad` (`latencia_alta`), `escalado` (`--entradas`, `--tamanos`), `fallo` (`--fallo-en`).
+- **Niveles de tiempo (`--tiempo`):** `normal` (×1: 10s/30s/60s), `alto` (×3), `muy-alto` (×6), o `--plazo SEG`.
+- **Fuente (`--fuente`):** `auto` (eBPF si hay capacidades, con respaldo a `/proc`), `ebpf`, `proc`.
+- **Historial y retención:**
   ```bash
-  ./bin/tracelite
+  ./bin/tracelite --historial
+  ./bin/tracelite --historial --trace <trace_id>
   ```
-- Observa un proceso por su PID:
-  ```bash
-  ./bin/tracelite <PID>
-  ```
-- Observa un proceso por su nombre:
-  ```bash
-  ./bin/tracelite antigravity
-  ./bin/tracelite chrome
-  ./bin/tracelite postgres
-  ```
-- Muestra la ayuda y ejemplos:
-  ```bash
-  ./bin/tracelite --help
-  ```
-
-### Modo resumen (`--resumen`)
-
-Monitorea el subárbol durante una ventana continua. Al finalizar, consolida cada proceso en una tabla jerárquica única.
-
-- Captura durante 60 segundos (valor predeterminado):
-  ```bash
-  ./bin/tracelite --resumen antigravity
-  ```
-- Define una duración en segundos con `-d` y un intervalo en ms con `--interval`:
-  ```bash
-  ./bin/tracelite --resumen -d 30 --interval 150 antigravity
-  ./bin/tracelite --resumen -d 20 chrome
-  ```
-- Usa `-d 0` para detener la captura manualmente con `Ctrl+C`.
 
 ---
 
-## 5. Detección de anomalías y pruebas
-
-El colector clasifica dos tipos de anomalía en la columna `ESTADO`:
-
-- `ERROR [error_proceso]`: ocurre cuando un PID no existe o termina durante la captura.
-  ```bash
-  ./bin/tracelite 999999
-  ```
-- `ANOMALIA [latencia_alta]`: ocurre cuando la duración de un span supera $\mu_{-i} + 2\sigma_{-i}$ (con margen mínimo de $1.5\,\mu_{-i}$ y $+10\text{ ms}$) frente a sus pares.
-
-Para probar carga real y anomalías en Linux, ejecuta los scripts de `pruebas/`:
+## 4. Pruebas y verificación
 
 ```bash
-./pruebas/carga_np.sh
-./pruebas/servicio_efimero.sh
+make test         # pruebas unitarias (span_t = 288 bytes y almacen JSONL)
+make check        # test_solicitudes.sh, caso_normal.sh y caso_anomalo.sh
+make check-modos  # matriz completa de modos y niveles de tiempo
 ```
+
+---
+
+## 5. Limitaciones conocidas
+
+- **eBPF por conexión (`conexion`):** soporta IPv4 en `127.0.0.1` sobre HTTP/1.0 sin TLS/HTTP2; el trabajo delegado a hilos ya existentes en el servidor (thread pools previos) no se atribuye a la conexión entrante.
+- **Respaldo `/proc` (`ventana`):** muestrea cada 20 ms y lee CPU en ticks de 10 ms; puede omitir procesos muy cortos (<20 ms) y no separa tráfico concurrente de otros clientes.
+- **Muestras pequeñas:** lotes de 5 solicitudes no permiten calcular percentiles `p95`/`p99`; se usan media/desviación estándar (`estabilidad`) y mediana (`escalado`).
+- **Contenedores/WSL:** la ruta eBPF requiere kernel Linux con BTF y namespace de PID inicial.
