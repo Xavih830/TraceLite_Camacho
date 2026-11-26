@@ -291,8 +291,10 @@ int main(int argc, char *argv[]) {
 
     int b_fd = conectar_unix(b_sock, 40, 25);
     if (b_fd >= 0) {
+        const char *vs = getenv("TRACELITE_VENTANA_SEG");
+        int vseg = (vs != NULL) ? atoi(vs) : 0;
         struct timeval tv;
-        tv.tv_sec = 5;
+        tv.tv_sec = (vseg > 0) ? (vseg + 5) : 5;
         tv.tv_usec = 0;
         setsockopt(b_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     }

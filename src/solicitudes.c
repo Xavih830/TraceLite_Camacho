@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <math.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -265,7 +266,7 @@ static int evaluar_y_alertar_solicitud(const solicitudes_cfg_t *cfg,
         return 0;
     }
 
-    span_t *sb = &g_spans[idx_b];
+    span_t *sb = (cfg->ventana_seg > 0 && idx_a >= 0) ? &g_spans[idx_a] : &g_spans[idx_b];
     if (cfg->modo == MODO_RESPUESTA) {
         double slo = cfg->slo_ms;
         if (slo <= 0.0) {
@@ -643,6 +644,13 @@ int ejecutar_solicitudes(const solicitudes_cfg_t *cfg,
     snprintf(puerto_str, sizeof(puerto_str), "%d", puerto);
     snprintf(fin_ord_str, sizeof(fin_ord_str), "%d", cfg->fin_por_orden ? 1 : 0);
 
+    if (cfg->ventana_seg > 0) {
+        char vbuf[16];
+        snprintf(vbuf, sizeof(vbuf), "%d", cfg->ventana_seg);
+        setenv("TRACELITE_VENTANA_SEG", vbuf, 1);
+    } else {
+        unsetenv("TRACELITE_VENTANA_SEG");
+    }
     fflush(stdout);
     pid_t pid_b = fork();
     if (pid_b == 0) {
@@ -757,6 +765,32 @@ int ejecutar_solicitudes(const solicitudes_cfg_t *cfg,
             break;
         }
 
+        int64_t t_sol_ini = ahora_ns();
+        int ult_seg = -1;
+        while (!(*detener_flag)) {
+            int seg = (int)((ahora_ns() - t_sol_ini) / 1000000000LL);
+            if (seg != ult_seg) {
+                ult_seg = seg;
+                int meta_s = (cfg->ventana_seg > 0) ? cfg->ventana_seg : cfg->plazo_s;
+                if (total_sol > 1 || cfg->resumen || cfg->ventana_seg > 0) {
+                    printf("\r[tracelite] Solicitud %d / %d: %2d / %d s...",
+                           i, total_sol, seg, meta_s);
+                    fflush(stdout);
+                }
+            }
+            struct pollfd pfd;
+            pfd.fd = a_fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            int pr = poll(&pfd, 1, 200);
+            if (pr > 0) {
+                break;
+            }
+            if (pr < 0 && errno != EINTR) {
+                break;
+            }
+        }
+
         sol_resp_t sr;
         memset(&sr, 0, sizeof(sr));
         if (leer_exacto(a_fd, &sr, sizeof(sr)) != 1) {
@@ -782,6 +816,9 @@ int ejecutar_solicitudes(const solicitudes_cfg_t *cfg,
             }
         }
         completadas++;
+    }
+    if ((total_sol > 1 || cfg->resumen) && completadas > 0) {
+        printf("\n");
     }
 
     if (cfg->resumen && cfg->modo == MODO_ESTABILIDAD) {

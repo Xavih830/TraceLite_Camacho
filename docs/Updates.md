@@ -451,3 +451,17 @@ Para detectar incrementos aleatorios o picos anómalos en el tiempo de ejecució
 - Se implementó `gui_form_construir_argv` y `gui_form_formatear_preview` para construir un arreglo literal de argumentos (`argv[]`, nunca shell) y mostrar el comando resultante en vivo.
 - Se integró el formulario en `src/gui.c` mediante `GSubprocess` (`g_subprocess_newv`), lectura asíncrona de salida estándar/error en un `GtkTextView`, botón **Detener** (`SIGINT` solo al `tracelite` lanzado por la interfaz), bloqueo de ejecuciones simultáneas, diálogo de confirmación al cerrar durante una ejecución y tabla de procesos en el detalle para `tipo = observacion`.
 - Se verificó compilación sin advertencias (`make && make test && make gui`), prueba unitaria de `gui_form_construir_argv`, paso literal de `; touch /tmp/tl_g2_inject` sin inyección de shell, preservación de PID de proceso vivo tras `SIGINT` a `tracelite` y arranque limpio de `bin/tracelite-gui`.
+
+
+---
+
+## [2026-11-25] Mejoras finales — Árbol vivo en `--app`, columna `RELACION`, ventana `-d`, contador por solicitud y guía de pruebas
+
+### Qué se implementó
+- Se corrigió `ejecutar_modo_resumen` en `src/tracelite.c` para enviar al colector todos los spans capturados en `hist[]` (en lugar de solo el span raíz `resumen_arbol_so`).
+- Se mejoró `dibujar_cascada` en `src/gui.c` con `GtkScrolledWindow` de altura dinámica, orden jerárquico DFS y margen derecho ampliado para evitar recortes.
+- Se agregó `tabla_formatear_relacion` y la columna/campo `RELACION` en `include/tabla.h`, `src/tabla.c` y `src/gui.c` para identificar el rol real de cada span (`lanzador -> ...`, `sensor_so -> ...`, `cliente_http -> backend`, `hijo_so -> ...`).
+- Se implementó muestreo continuo del árbol vivo en `src/servicio_b.c` (`hilo_muestreo_app` + `emitir_arbol_app_muestreado`) para destino `--app`, junto con el soporte de ventana `-d <seg>` por solicitud (`TRACELITE_VENTANA_SEG` en `include/solicitudes.h`, `src/solicitudes.c`, `src/servicio_a.c`, `src/servicio_b.c` y `src/tracelite.c`).
+- Se agregó en `src/solicitudes.c` el contador en vivo por solicitud (`[tracelite] Solicitud X / N: S / M s...`) y en `src/tabla.c` / `src/gui.c` la etiqueta `Solicitud N` por traza.
+- Se eliminaron los presets `--tiempo` (`normal`, `alto`, `muy-alto`) del formulario gráfico (`include/gui_form.h`, `src/gui_form.c`, `src/gui.c`), dejando la configuración manual de `Duración (s)` (`-d`) y `Plazo máx (s)` (`--plazo`).
+- Se crearon `docs/pruebas/pruebas_vivos.sh` y `docs/GUIA_PRUEBAS_ANTIGRAVITY.md`.

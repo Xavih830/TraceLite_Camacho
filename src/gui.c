@@ -1,6 +1,7 @@
 #include "almacen.h"
 #include "common.h"
 #include "gui_form.h"
+#include "tabla.h"
 
 #include <cairo.h>
 #include <gtk/gtk.h>
@@ -20,6 +21,7 @@ typedef struct {
     char    operacion[48];
     char    tipo[16];
     double  dur_ms;
+    int     solicitud;
     int     tiene_error;
     int     tiene_alerta;
     char    anomalia[24];
@@ -117,6 +119,7 @@ static void construir_indice_trazas(visor_app_t *app) {
             snprintf(tr->operacion, sizeof(tr->operacion), "%s", r->span.operacion);
             tr->ini_ns = r->span.ini;
             tr->ini_real_ns = r->meta.ini_real_ns;
+            tr->solicitud = r->meta.solicitud;
             formatear_hora_real(r->meta.ini_real_ns, tr->hora, sizeof(tr->hora));
         }
 
@@ -148,6 +151,9 @@ static void actualizar_detalle(visor_app_t *app) {
 
     const traza_resumen_t *tr = &app->trazas[app->sel_traza];
     GString *gs = g_string_new("");
+    if (tr->solicitud > 0) {
+        g_string_append_printf(gs, "Solicitud #%d | ", tr->solicitud);
+    }
     g_string_append_printf(gs, "Trace ID: %s | Tipo: %s | Modo: %s | Destino: %s | Hora: %s\n",
                            tr->trace_id, tr->tipo, tr->modo, tr->destino, tr->hora);
     if (tr->tiene_alerta) {
@@ -156,13 +162,16 @@ static void actualizar_detalle(visor_app_t *app) {
 
     if (strcmp(tr->tipo, "observacion") == 0) {
         g_string_append(gs, "\nTabla de procesos (observación):\n");
-        g_string_append(gs, "PID      | Servicio         | Operación        | CPU (ms) | Procs | Dur (ms) | Estado\n");
-        g_string_append(gs, "---------+------------------+------------------+----------+-------+----------+--------\n");
+        g_string_append(gs, "PID      | Servicio         | Relación             | Operación        | CPU (ms) | Procs | Dur (ms) | Estado\n");
+        g_string_append(gs, "---------+------------------+----------------------+------------------+----------+-------+----------+--------\n");
         for (int i = 0; i < tr->n_spans; i++) {
-            const span_t *s = &app->alm.regs[tr->idx_spans[i]].span;
+            const almacen_registro_t *r = &app->alm.regs[tr->idx_spans[i]];
+            const span_t *s = &r->span;
             const char *est = s->estado ? "ERROR" : (s->anomalia[0] ? "ANOMALIA" : "OK");
-            g_string_append_printf(gs, "%-8d | %-16.16s | %-16.16s | %8.2f | %5d | %8.2f | %s\n",
-                                   s->pid, s->servicio, s->operacion, s->cpu_ms, s->n_procs, s->dur, est);
+            char rel[48];
+            tabla_formatear_relacion(s, tr->destino, tr->tipo, rel, sizeof(rel));
+            g_string_append_printf(gs, "%-8d | %-16.16s | %-20.20s | %-16.16s | %8.2f | %5d | %8.2f | %s\n",
+                                   s->pid, s->servicio, rel, s->operacion, s->cpu_ms, s->n_procs, s->dur, est);
         }
     }
 
@@ -170,9 +179,11 @@ static void actualizar_detalle(visor_app_t *app) {
         const almacen_registro_t *r = &app->alm.regs[tr->idx_spans[i]];
         const span_t *s = &r->span;
         const char *est = s->estado ? "ERROR" : (s->anomalia[0] ? "ANOMALIA" : "OK");
+        char rel[48];
+        tabla_formatear_relacion(s, tr->destino, tr->tipo, rel, sizeof(rel));
         g_string_append_printf(gs,
-                               "\n• %s (%s) | span=%s parent=%s | pid=%d | dur=%.2f ms | cpu=%.2f ms | procs=%d | estado=%s",
-                               s->servicio, s->operacion, s->span_id,
+                               "\n• %s (%s) | relación=%s | span=%s parent=%s | pid=%d | dur=%.2f ms | cpu=%.2f ms | procs=%d | estado=%s",
+                               s->servicio, s->operacion, rel, s->span_id,
                                s->parent[0] ? s->parent : "(raiz)",
                                s->pid, s->dur, s->cpu_ms, s->n_procs, est);
         if (s->atribucion[0] != '\0') {
@@ -185,7 +196,26 @@ static void actualizar_detalle(visor_app_t *app) {
 
     gtk_label_set_text(GTK_LABEL(app->lbl_detalle), gs->str);
     g_string_free(gs, TRUE);
+    int alto = tr->n_spans * 26 + 24;
+    if (alto < 180) alto = 180;
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(app->area_cascada), alto);
     gtk_widget_queue_draw(app->area_cascada);
+}
+
+static void ordenar_dfs_cascada(const visor_app_t *app, const traza_resumen_t *tr,
+                                int idx_pos, int prof, int *usado,
+                                int *orden, int *prof_out, int *n_out) {
+    if (usado[idx_pos] || *n_out >= tr->n_spans) return;
+    usado[idx_pos] = 1;
+    orden[*n_out] = idx_pos;
+    prof_out[*n_out] = prof;
+    (*n_out)++;
+    const char *sid = app->alm.regs[tr->idx_spans[idx_pos]].span.span_id;
+    for (int i = 0; i < tr->n_spans; i++) {
+        if (!usado[i] && strcmp(app->alm.regs[tr->idx_spans[i]].span.parent, sid) == 0) {
+            ordenar_dfs_cascada(app, tr, i, prof + 1, usado, orden, prof_out, n_out);
+        }
+    }
 }
 
 static void dibujar_cascada(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer data) {
@@ -209,25 +239,52 @@ static void dibujar_cascada(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpo
     double total_ms = (double)(max_fin - min_ini) / 1000000.0;
     if (total_ms <= 0.0) total_ms = 1.0;
 
-    double margen_izq = 180.0;
-    double ancho_bar = (double)w - margen_izq - 24.0;
+    double margen_izq = 210.0;
+    double ancho_bar = (double)w - margen_izq - 84.0;
     if (ancho_bar < 40.0) ancho_bar = 40.0;
     double escala = ancho_bar / total_ms;
     double alto_fila = 26.0;
 
+    int orden[128], profs[128], usado[128];
+    int n_ord = 0;
+    memset(usado, 0, sizeof(usado));
+    for (int i = 0; i < tr->n_spans; i++) {
+        const span_t *s = &app->alm.regs[tr->idx_spans[i]].span;
+        int tiene_padre = 0;
+        for (int j = 0; j < tr->n_spans; j++) {
+            if (i != j && strcmp(s->parent, app->alm.regs[tr->idx_spans[j]].span.span_id) == 0) {
+                tiene_padre = 1;
+                break;
+            }
+        }
+        if (!tiene_padre) {
+            ordenar_dfs_cascada(app, tr, i, 0, usado, orden, profs, &n_ord);
+        }
+    }
+    for (int i = 0; i < tr->n_spans; i++) {
+        if (!usado[i]) {
+            ordenar_dfs_cascada(app, tr, i, 0, usado, orden, profs, &n_ord);
+        }
+    }
+
     cairo_select_font_face(cr, "Monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 11.0);
 
-    for (int i = 0; i < tr->n_spans && (i + 1) * alto_fila < (double)h; i++) {
-        const span_t *s = &app->alm.regs[tr->idx_spans[i]].span;
-        double y = 12.0 + (double)i * alto_fila;
-        int sangria = (s->parent[0] != '\0') ? 16 : 0;
+    for (int row = 0; row < n_ord && (row + 1) * alto_fila < (double)h + alto_fila; row++) {
+        const span_t *s = &app->alm.regs[tr->idx_spans[orden[row]]].span;
+        double y = 12.0 + (double)row * alto_fila;
+        int sangria = profs[row] * 10;
+        if (sangria > 70) sangria = 70;
 
+        cairo_save(cr);
+        cairo_rectangle(cr, 0.0, y, margen_izq - 8.0, alto_fila);
+        cairo_clip(cr);
         cairo_set_source_rgb(cr, 0.88, 0.90, 0.93);
         cairo_move_to(cr, 10.0 + sangria, y + 14.0);
         char lbl[80];
-        snprintf(lbl, sizeof(lbl), "%.32s (%.32s)", s->servicio, s->operacion);
+        snprintf(lbl, sizeof(lbl), "%.18s (%.14s)", s->servicio, s->operacion);
         cairo_show_text(cr, lbl);
+        cairo_restore(cr);
 
         double off_ms = (double)(s->ini - min_ini) / 1000000.0;
         if (off_ms < 0.0) off_ms = 0.0;
@@ -370,7 +427,7 @@ static void leer_valores_form(const visor_app_t *app, gui_form_valores_t *v) {
     v->obs_interval_ms = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->w_campos[C_OBS_INTERVAL]));
     v->destino   = (gui_destino_t)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_DESTINO]));
     v->modo      = (gui_modo_t)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_MODO]));
-    v->tiempo    = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_TIEMPO]));
+    v->plazo_s   = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->w_campos[C_PLAZO_S]));
     v->bk_nuevo  = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_BK_MODO]));
     v->app_nueva = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_APP_MODO]));
     v->app_fin   = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_APP_FIN]));
@@ -696,9 +753,12 @@ static void on_activate(GtkApplication *gapp, gpointer data) {
 
     GtkWidget *vbox_inf = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     app->area_cascada = gtk_drawing_area_new();
-    gtk_widget_set_size_request(app->area_cascada, -1, 180);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(app->area_cascada), 180);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(app->area_cascada), dibujar_cascada, app, NULL);
-    gtk_box_append(GTK_BOX(vbox_inf), app->area_cascada);
+    GtkWidget *sc_cas = gtk_scrolled_window_new();
+    gtk_widget_set_size_request(sc_cas, -1, 220);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sc_cas), app->area_cascada);
+    gtk_box_append(GTK_BOX(vbox_inf), sc_cas);
 
     app->lbl_detalle = gtk_label_new("");
     gtk_label_set_xalign(GTK_LABEL(app->lbl_detalle), 0.0f);

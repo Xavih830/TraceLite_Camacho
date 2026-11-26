@@ -2,6 +2,9 @@
 #include "fuente.h"
 #include "protocolo.h"
 
+#include <ctype.h>
+#include <dirent.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +26,177 @@ static int verificar_peer_uid(int fd) {
         return -1;
     }
     return (cred.uid == getuid()) ? 0 : -1;
+}
+
+typedef struct {
+    int     pid;
+    int     ppid;
+    char    comm[32];
+    char    span_id[17];
+    char    parent_span[17];
+    int64_t ini_ns;
+    int64_t fin_ns;
+    unsigned long long ticks_ini;
+    unsigned long long ticks_ult;
+    int     visto;
+    int     finalizado;
+} proc_vivo_t;
+
+typedef struct {
+    proc_vivo_t  arbol[64];
+    int          n_arb;
+    int          pid_raiz;
+    char         sb_span_id[17];
+    volatile int corriendo;
+    int          activo_hilo;
+    pthread_t    th;
+} muestreo_app_t;
+
+static void muestrear_una_vez(muestreo_app_t *m) {
+    DIR *dir = opendir("/proc");
+    if (dir == NULL) return;
+
+    proc_vivo_t lista[512];
+    int n_lista = 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL && n_lista < 512) {
+        if (!isdigit((unsigned char)de->d_name[0])) continue;
+        int pid = atoi(de->d_name);
+        if (pid <= 0) continue;
+        char ruta[64];
+        snprintf(ruta, sizeof(ruta), "/proc/%d/stat", pid);
+        FILE *f = fopen(ruta, "r");
+        if (f == NULL) continue;
+        char buf[512];
+        size_t nr = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (nr == 0) continue;
+        buf[nr] = '\0';
+        char *lp = strchr(buf, '(');
+        char *rp = strrchr(buf, ')');
+        if (lp == NULL || rp == NULL || rp <= lp) continue;
+        size_t clen = (size_t)(rp - lp - 1);
+        if (clen >= sizeof(lista[n_lista].comm)) clen = sizeof(lista[n_lista].comm) - 1;
+        memcpy(lista[n_lista].comm, lp + 1, clen);
+        lista[n_lista].comm[clen] = '\0';
+        char est = 0;
+        int ppid = 0;
+        unsigned long long ut = 0, st = 0;
+        int ntok = sscanf(rp + 2,
+                          "%c %d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",
+                          &est, &ppid, &ut, &st);
+        if (ntok >= 2) {
+            lista[n_lista].pid = pid;
+            lista[n_lista].ppid = ppid;
+            lista[n_lista].ticks_ult = (ntok == 4) ? (ut + st) : 0ULL;
+            n_lista++;
+        }
+    }
+    closedir(dir);
+
+    /* Recolectar subárbol actual desde pid_raiz */
+    int sub_idx[64];
+    int n_sub = 0;
+    for (int i = 0; i < n_lista; i++) {
+        if (lista[i].pid == m->pid_raiz) {
+            sub_idx[n_sub++] = i;
+            break;
+        }
+    }
+    for (int head = 0; head < n_sub && n_sub < 64; head++) {
+        int p_pid = lista[sub_idx[head]].pid;
+        for (int i = 0; i < n_lista && n_sub < 64; i++) {
+            if (lista[i].ppid == p_pid) {
+                sub_idx[n_sub++] = i;
+            }
+        }
+    }
+
+    for (int i = 0; i < m->n_arb; i++) m->arbol[i].visto = 0;
+    int64_t t_now = ahora_ns();
+
+    for (int s = 0; s < n_sub; s++) {
+        const proc_vivo_t *p = &lista[sub_idx[s]];
+        int idx = -1;
+        for (int j = 0; j < m->n_arb; j++) {
+            if (!m->arbol[j].finalizado && m->arbol[j].pid == p->pid) {
+                idx = j;
+                break;
+            }
+        }
+        if (idx >= 0) {
+            m->arbol[idx].visto = 1;
+            m->arbol[idx].fin_ns = t_now;
+            m->arbol[idx].ticks_ult = p->ticks_ult;
+        } else if (m->n_arb < 64) {
+            proc_vivo_t *dst = &m->arbol[m->n_arb++];
+            memset(dst, 0, sizeof(*dst));
+            dst->pid = p->pid;
+            dst->ppid = p->ppid;
+            snprintf(dst->comm, sizeof(dst->comm), "%s", p->comm);
+            id_hex(dst->span_id, 8);
+            snprintf(dst->parent_span, sizeof(dst->parent_span), "(raiz)");
+            if (m->sb_span_id[0] != '\0') {
+                memcpy(dst->parent_span, m->sb_span_id, sizeof(dst->parent_span));
+                dst->parent_span[sizeof(dst->parent_span) - 1] = '\0';
+            }
+            for (int k = m->n_arb - 2; k >= 0; k--) {
+                if (!m->arbol[k].finalizado && m->arbol[k].pid == p->ppid) {
+                    memcpy(dst->parent_span, m->arbol[k].span_id, sizeof(dst->parent_span));
+                    dst->parent_span[sizeof(dst->parent_span) - 1] = '\0';
+                    break;
+                }
+            }
+            dst->ini_ns = t_now;
+            dst->fin_ns = t_now;
+            dst->ticks_ini = p->ticks_ult;
+            dst->ticks_ult = p->ticks_ult;
+            dst->visto = 1;
+        }
+    }
+    for (int i = 0; i < m->n_arb; i++) {
+        if (!m->arbol[i].finalizado && !m->arbol[i].visto) {
+            m->arbol[i].finalizado = 1;
+            m->arbol[i].fin_ns = t_now;
+        }
+    }
+}
+
+static void *hilo_muestreo_app(void *arg) {
+    muestreo_app_t *m = (muestreo_app_t *)arg;
+    while (m->corriendo) {
+        muestrear_una_vez(m);
+        dormir_ms(80);
+    }
+    return NULL;
+}
+
+static void emitir_arbol_app_muestreado(int spans_fd, const span_t *sb,
+                                        const muestreo_app_t *m) {
+    if (spans_fd < 0 || m->n_arb <= 0) return;
+    long clk_tck = sysconf(_SC_CLK_TCK);
+    if (clk_tck <= 0) clk_tck = 100;
+    for (int i = 0; i < m->n_arb; i++) {
+        const proc_vivo_t *r = &m->arbol[i];
+        span_t s;
+        memset(&s, 0, sizeof(s));
+        snprintf(s.trace_id, sizeof(s.trace_id), "%s", sb->trace_id);
+        snprintf(s.span_id, sizeof(s.span_id), "%s", r->span_id);
+        snprintf(s.parent, sizeof(s.parent), "%s", r->parent_span);
+        snprintf(s.servicio, sizeof(s.servicio), "%s", r->comm);
+        snprintf(s.operacion, sizeof(s.operacion), "pid:%d", r->pid);
+        s.ini = (r->ini_ns >= sb->ini) ? r->ini_ns : sb->ini;
+        s.fin = (r->fin_ns > s.ini) ? r->fin_ns : (s.ini + 1000000LL);
+        if (s.fin > sb->fin) s.fin = sb->fin;
+        s.dur = (double)(s.fin - s.ini) / 1000000.0;
+        s.pid = r->pid;
+        s.n_procs = 1;
+        if (r->ticks_ult >= r->ticks_ini) {
+            s.cpu_ms = (double)(r->ticks_ult - r->ticks_ini) * 1000.0 / (double)clk_tck;
+        }
+        snprintf(s.atribucion, sizeof(s.atribucion), "%s", sb->atribucion);
+        escribir_exacto(spans_fd, &s, sizeof(span_t));
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -114,6 +288,8 @@ int main(int argc, char *argv[]) {
     int activo = 0;
     int pid_obj = 0;
     const fuente_t *fuente_act = fuente;
+    muestreo_app_t muestreo;
+    memset(&muestreo, 0, sizeof(muestreo));
 
     ctx_t ctx;
     while (leer_exacto(a_fd, &ctx, sizeof(ctx)) == 1) {
@@ -130,6 +306,13 @@ int main(int argc, char *argv[]) {
             } else if (ctx.pid_programa == 0 && ctx.pid_app > 0) {
                 fuente_act = &fuente_proc;
                 fuente_act->iniciar(0, ctx.pid_app, ctx.solicitud);
+                memset(&muestreo, 0, sizeof(muestreo));
+                muestreo.pid_raiz = ctx.pid_app;
+                snprintf(muestreo.sb_span_id, sizeof(muestreo.sb_span_id), "%s", sb.span_id);
+                muestreo.corriendo = 1;
+                if (pthread_create(&muestreo.th, NULL, hilo_muestreo_app, &muestreo) == 0) {
+                    muestreo.activo_hilo = 1;
+                }
             } else {
                 fuente_act = fuente;
                 fuente_act->iniciar(ctx.pid_programa, ctx.pid_app, ctx.solicitud);
@@ -177,8 +360,23 @@ int main(int argc, char *argv[]) {
                 }
                 if (reposo_seguido < 3) sin_reposo = 1;
             }
+            if (ctx.pid_programa == 0 && ctx.pid_app > 0 && puerto_backend == 0) {
+                const char *vs = getenv("TRACELITE_VENTANA_SEG");
+                int vseg = (vs != NULL) ? atoi(vs) : 0;
+                if (vseg > 0) {
+                    int64_t meta_ns = sb.ini + (int64_t)vseg * 1000000000LL;
+                    while (ahora_ns() < meta_ns) {
+                        dormir_ms(100);
+                    }
+                }
+            }
             fuente_act->detener();
             fuente_act->leer(&m);
+            if (muestreo.activo_hilo) {
+                muestreo.corriendo = 0;
+                pthread_join(muestreo.th, NULL);
+                muestreo.activo_hilo = 0;
+            }
             activo = 0;
 
             int estado_b = (ctx.estado_salida != 0) ? 1 : 0;
@@ -223,6 +421,9 @@ int main(int argc, char *argv[]) {
 
             if (spans_fd >= 0) {
                 escribir_exacto(spans_fd, &sb, sizeof(span_t));
+                if (ctx.pid_programa == 0 && ctx.pid_app > 0 && puerto_backend == 0) {
+                    emitir_arbol_app_muestreado(spans_fd, &sb, &muestreo);
+                }
             }
 
             resp_t r;

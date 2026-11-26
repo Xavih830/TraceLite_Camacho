@@ -29,6 +29,7 @@ typedef struct {
     int            resumen;
     int            n_solicitudes;
     int            plazo_s;
+    int            ventana_seg;
     int            mostrar_salida;
     const char    *lote_path;
     const char    *cmd_linea;

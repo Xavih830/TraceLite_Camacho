@@ -24,12 +24,50 @@ typedef struct {
     int w_fin;
     int w_id;
     int w_serv;
+    int w_rel;
     int w_op;
     int w_dur;
     int w_casc;
     int w_pid;
     int w_msg;
 } tabla_layout_t;
+
+void tabla_formatear_relacion(const span_t *s, const char *destino,
+                              const char *tipo, char *out, size_t out_sz) {
+    if (out == NULL || out_sz == 0) return;
+    if (s == NULL) {
+        out[0] = '\0';
+        return;
+    }
+    int es_http = (strncmp(s->operacion, "GET ", 4) == 0 ||
+                   strncmp(s->operacion, "POST ", 5) == 0 ||
+                   strncmp(s->operacion, "HTTP", 4) == 0);
+    if (strcmp(s->servicio, "servicio_a") == 0) {
+        if ((destino != NULL && strcmp(destino, "backend") == 0) || es_http) {
+            snprintf(out, out_sz, "cliente_http -> backend");
+        } else if (destino != NULL && strcmp(destino, "app") == 0) {
+            snprintf(out, out_sz, "cliente_ipc -> app_viva");
+        } else {
+            snprintf(out, out_sz, "lanzador -> %.20s", s->operacion);
+        }
+    } else if (strcmp(s->servicio, "servicio_b") == 0) {
+        if ((destino != NULL && strcmp(destino, "backend") == 0) || es_http) {
+            snprintf(out, out_sz, "sensor_so -> backend");
+        } else if (destino != NULL && strcmp(destino, "app") == 0) {
+            snprintf(out, out_sz, "sensor_so -> app_viva");
+        } else {
+            snprintf(out, out_sz, "sensor_so -> %.20s", s->operacion);
+        }
+    } else if (strcmp(s->servicio, "tracelite") == 0) {
+        snprintf(out, out_sz, "orquestador -> arbol_so");
+    } else if (tipo != NULL && strcmp(tipo, "observacion") == 0) {
+        snprintf(out, out_sz, "proceso_so -> pid:%d", s->pid);
+    } else if (s->parent[0] != '\0') {
+        snprintf(out, out_sz, "hijo_so -> %.20s", s->servicio);
+    } else {
+        snprintf(out, out_sz, "%.14s -> %.14s", s->servicio, s->operacion);
+    }
+}
 
 static void formatear_fecha_ns(int64_t real_ns, char *buf, size_t sz, int incluir_fecha) {
     if (real_ns < 0) real_ns = 0;
@@ -67,29 +105,32 @@ static tabla_layout_t calcular_layout(void) {
         l.ini_con_fecha = 1;
         l.w_ini  = 23;
         l.w_id   = 16;
-        l.w_serv = 22;
-        l.w_op   = 26;
-        l.w_casc = 16;
+        l.w_serv = 20;
+        l.w_rel  = 22;
+        l.w_op   = 22;
+        l.w_casc = 14;
     } else if (l.cols >= 125) {
         l.ini_con_fecha = 0;
         l.w_ini  = 12;
         l.w_id   = 12;
-        l.w_serv = 20;
-        l.w_op   = 22;
-        l.w_casc = 12;
+        l.w_serv = 18;
+        l.w_rel  = 18;
+        l.w_op   = 18;
+        l.w_casc = 10;
     } else {
         l.ini_con_fecha = 0;
         l.w_ini  = 12;
         l.w_id   = 8;
-        l.w_serv = 16;
-        l.w_op   = 16;
+        l.w_serv = 14;
+        l.w_rel  = 14;
+        l.w_op   = 14;
         l.w_casc = 8;
     }
 
     /* Ancho fijo previo a la columna ESTADO */
     int usado = l.w_ini + 1 + l.w_fin + 1 + l.w_id + 1 + l.w_id + 1 +
-                l.w_serv + 1 + l.w_op + 1 + l.w_dur + 2 + (l.w_casc + 2) + 2 +
-                l.w_pid + 1 + 6;
+                l.w_serv + 1 + l.w_rel + 1 + l.w_op + 1 + l.w_dur + 2 +
+                (l.w_casc + 2) + 2 + l.w_pid + 1 + 6;
     l.w_msg = l.cols - usado - 3;
     if (l.w_msg < 0) l.w_msg = 0;
     return l;
@@ -167,12 +208,16 @@ static void imprimir_arbol(const span_t *spans, int n_spans, int idx, int *impre
     const char *color_bar = es_error ? C_RED : (es_anom_tiempo ? C_YELLOW : C_CYAN);
     const char *est_txt   = es_error ? "ERROR" : (es_anom_tiempo ? "ANOMALIA" : "OK");
 
-    printf("%-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %*s  %s[%s]%s  %-*d %s%s",
+    char rel_col[48];
+    tabla_formatear_relacion(s, NULL, NULL, rel_col, sizeof(rel_col));
+
+    printf("%-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %-*.*s %*s  %s[%s]%s  %-*d %s%s",
            l->w_ini, l->w_ini, ini_fecha,
            l->w_fin, l->w_fin, fin_hora,
            l->w_id, l->w_id, s->span_id,
            l->w_id, l->w_id, parent_str,
            l->w_serv, l->w_serv, serv_col,
+           l->w_rel, l->w_rel, rel_col,
            l->w_op, l->w_op, s->operacion,
            l->w_dur, dur_str,
            color_bar, cascada, C_RESET,
@@ -245,15 +290,16 @@ int imprimir_trazas_spans(const span_t *spans, int n_spans) {
         tabla_layout_t l = calcular_layout();
 
         num_trazas++;
-        printf("\n%s%sTRACE ID: %s%s  %s| Start: %s | Duracion total: %.2f ms%s\n",
-               C_BOLD, C_YELLOW, tid, C_RESET, C_DIM, inicio_traza, total_ms, C_RESET);
-        printf("%s%-*s %-*s %-*s %-*s %-*s %-*s %*s  %-*s  %-*s %s%s\n",
+        printf("\n%s%sSolicitud %d | TRACE ID: %s%s  %s| Start: %s | Duracion total: %.2f ms%s\n",
+               C_BOLD, C_YELLOW, num_trazas, tid, C_RESET, C_DIM, inicio_traza, total_ms, C_RESET);
+        printf("%s%-*s %-*s %-*s %-*s %-*s %-*s %-*s %*s  %-*s  %-*s %s%s\n",
                C_BOLD,
                l.w_ini, "INICIO",
                l.w_fin, "FIN",
                l.w_id, "SPAN_ID",
                l.w_id, "PARENT_ID",
                l.w_serv, "SERVICIO",
+               l.w_rel, "RELACION",
                l.w_op, "OPERACION",
                l.w_dur, "DURACION",
                l.w_casc + 2, "CASCADA",

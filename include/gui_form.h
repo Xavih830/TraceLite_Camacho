@@ -38,7 +38,7 @@ typedef enum {
     C_OBS_INTERVAL,
     C_DESTINO,
     C_MODO,
-    C_TIEMPO,
+    C_PLAZO_S,
     C_PROG_BIN,
     C_PROG_ARG1,
     C_PROG_ARG2,
@@ -65,7 +65,7 @@ typedef struct {
     gui_forma_t   forma;
     gui_destino_t destino;
     gui_modo_t    modo;
-    int           tiempo;      /* 0=normal, 1=alto, 2=muy-alto */
+    int           plazo_s;     /* 0=por defecto, >0=--plazo */
     int           obs_durante; /* 0=no, 1=si (--resumen) */
     int           obs_duracion_s;
     int           obs_interval_ms;

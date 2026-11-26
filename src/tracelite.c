@@ -498,6 +498,36 @@ static int ejecutar_modo_resumen(int pid_raiz, const char *sock_path,
     printf("\n");
 
     span_fin(&raiz, (n_hist == 0) ? 1 : 0, (n_hist == 0) ? "pid_no_encontrado" : "", "");
+    raiz.n_procs = n_hist;
+
+    if (n_hist > 0) {
+        int fd_col = conectar_colector(sock_path);
+        if (fd_col >= 0) {
+            long clk_tck = sysconf(_SC_CLK_TCK);
+            if (clk_tck <= 0) clk_tck = 100;
+            for (int i = 0; i < n_hist; i++) {
+                const resumen_proc_t *r = &hist[i];
+                span_t s;
+                memset(&s, 0, sizeof(s));
+                snprintf(s.trace_id, sizeof(s.trace_id), "%s", raiz.trace_id);
+                snprintf(s.span_id, sizeof(s.span_id), "%s", r->span_id);
+                snprintf(s.parent, sizeof(s.parent), "%s", r->parent_span_id);
+                snprintf(s.servicio, sizeof(s.servicio), "%s", r->comm);
+                snprintf(s.operacion, sizeof(s.operacion), "%s", r->cmdline[0] ? r->cmdline : r->comm);
+                s.ini = r->ini_ns;
+                s.fin = (r->fin_ns > r->ini_ns) ? r->fin_ns : (r->ini_ns + 1000000LL);
+                s.dur = (double)(s.fin - s.ini) / 1000000.0;
+                s.pid = r->pid;
+                s.n_procs = 1;
+                if (r->ticks_ult >= r->ticks_ini) {
+                    s.cpu_ms = (double)(r->ticks_ult - r->ticks_ini) * 1000.0 / (double)clk_tck;
+                }
+                snprintf(s.atribucion, sizeof(s.atribucion), "exacta");
+                escribir_exacto(fd_col, &s, sizeof(span_t));
+            }
+            close(fd_col);
+        }
+    }
 
     cerrar_colector(pid_col, sock_path, &raiz);
 
@@ -694,8 +724,8 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "[tracelite] No combines --backend con --lanzar-backend.\n");
             return 2;
         }
-        if (duracion_seg >= 0 || interval_set) {
-            fprintf(stderr, "[tracelite] -d e --interval solo aplican en modo observación.\n");
+        if ((duracion_seg >= 0 && !es_app_dest) || interval_set) {
+            fprintf(stderr, "[tracelite] -d (sin --app) e --interval solo aplican en modo observación.\n");
             return 2;
         }
         if (lote_path != NULL && !modo_resumen) {
@@ -755,6 +785,7 @@ int main(int argc, char *argv[]) {
         memset(&cfg, 0, sizeof(cfg));
         cfg.resumen = modo_resumen;
         cfg.n_solicitudes = (n_sol > 0) ? n_sol : (modo_resumen ? 5 : 1);
+        cfg.ventana_seg = (duracion_seg > 0) ? duracion_seg : 0;
         if (plazo_set) {
             cfg.plazo_s = plazo_s;
         } else if (modo == MODO_ESCALADO) {
@@ -763,6 +794,9 @@ int main(int argc, char *argv[]) {
             cfg.plazo_s = 60 * factor_t;
         } else {
             cfg.plazo_s = 10 * factor_t;
+        }
+        if (!plazo_set && cfg.ventana_seg > 0 && cfg.plazo_s < cfg.ventana_seg + 2) {
+            cfg.plazo_s = cfg.ventana_seg + 2;
         }
         cfg.mostrar_salida = mostrar_salida;
         cfg.lote_path = lote_path;
