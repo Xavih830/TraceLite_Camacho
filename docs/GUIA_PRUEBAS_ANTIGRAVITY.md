@@ -99,7 +99,6 @@ Este documento reúne los comandos de prueba centrados en **`antigravity-ide`** 
   ```bash
   make test
   make check
-  bash docs/pruebas/pruebas_vivos.sh
   ```
 
 ---

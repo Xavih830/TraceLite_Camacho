@@ -39,12 +39,7 @@ test: $(HDRS)
 	$(CC) $(CFLAGS) tests/test_almacen.c src/almacen.c src/tabla.c $(COMUN) -o $(BIN)/test_almacen && ./$(BIN)/test_almacen
 
 check: all test
-	bash tests/test_solicitudes.sh
-	bash docs/pruebas/caso_normal.sh
-	bash docs/pruebas/caso_anomalo.sh
-
-check-modos: all
-	bash docs/pruebas/matriz_modos.sh
+	bash docs/pruebas/pruebas_vivos.sh
 
 gui: $(HDRS) include/gui_form.h
 	@mkdir -p $(BIN)

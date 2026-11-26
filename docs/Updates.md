@@ -465,3 +465,14 @@ Para detectar incrementos aleatorios o picos anómalos en el tiempo de ejecució
 - Se agregó en `src/solicitudes.c` el contador en vivo por solicitud (`[tracelite] Solicitud X / N: S / M s...`) y en `src/tabla.c` / `src/gui.c` la etiqueta `Solicitud N` por traza.
 - Se eliminaron los presets `--tiempo` (`normal`, `alto`, `muy-alto`) del formulario gráfico (`include/gui_form.h`, `src/gui_form.c`, `src/gui.c`), dejando la configuración manual de `Duración (s)` (`-d`) y `Plazo máx (s)` (`--plazo`).
 - Se crearon `docs/pruebas/pruebas_vivos.sh` y `docs/GUIA_PRUEBAS_ANTIGRAVITY.md`.
+
+
+---
+
+## [2026-11-25] Depuración final — Enfoque exclusivo en aplicaciones vivas
+
+### Qué se implementó
+- Se eliminaron de `src/tracelite.c` las opciones ajenas a aplicaciones vivas (`--backend`, `--lanzar-backend`, `--backend-pid`, `--ruta`, `--lanzar-app`, `--lote`, `--tiempo` y solicitudes sin `--app`/`--unidad`), actualizando `imprimir_ayuda`.
+- Se simplificó el formulario de `tracelite-gui` (`include/gui_form.h`, `src/gui_form.c`, `src/gui.c`) para exponer únicamente **Observación** y solicitudes sobre **app viva** (`--app` / `--unidad`), manteniendo la configuración manual de `-d` (`Duración (s)`) y `--plazo` (`Plazo máx (s)`).
+- Se eliminaron los scripts obsoletos de backend y pruebas aisladas (`tests/test_backend.sh`, `tests/test_solicitudes.sh`, `docs/pruebas/backend_demo.py`, `docs/pruebas/caso_normal.sh`, `docs/pruebas/caso_anomalo.sh`, `docs/pruebas/matriz_modos.sh`, `docs/pruebas/preparar_datos.sh`, `docs/pruebas/comparar_fuentes.sh`), dejando `make check` conectado a `docs/pruebas/pruebas_vivos.sh`.
+- Se verificó compilación sin advertencias (`make && make gui`), `make check` superado (`test_span`, `test_almacen`, `pruebas_vivos.sh`) y arranque limpio de `bin/tracelite-gui`.

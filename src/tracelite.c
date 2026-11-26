@@ -260,23 +260,29 @@ static int buscar_pid_por_nombre(const proc_info_t *lista, int n, const char *no
 static void imprimir_ayuda(const char *prog) {
     printf("Uso:\n");
     printf("  Observación: %s [PID | NOMBRE] [-r] [-d SEG] [--interval MS]\n", prog);
-    printf("  Solicitudes: %s [--resumen] [-n N] [--plazo SEG] [--mostrar-salida] -- <comando...>\n", prog);
-    printf("               %s --resumen --lote <archivo> [--plazo SEG]\n\n", prog);
+    printf("  App viva:    %s --app <NOMBRE|PID> [--resumen] [-d SEG] [--plazo SEG] [--modo MODO] -- <orden...>\n", prog);
+    printf("  Historial:   %s --historial [--trace ID]\n\n", prog);
     printf("Opciones:\n");
-    printf("  -r, --resumen          En observación: captura continua (60 s); en solicitudes: serie de 5\n");
-    printf("  -d, --duracion <seg>   Duración en segundos para observación --resumen (0 = Ctrl+C)\n");
+    printf("  -r, --resumen          En observación: captura continua; en --app: serie de solicitudes\n");
+    printf("  -d, --duracion <seg>   Duración en segundos de la ventana de observación\n");
     printf("  --interval <ms>        Intervalo de muestreo en ms (solo observación, por defecto 150)\n");
-    printf("  -n <N>                 Número de solicitudes (5 por defecto, solo con --resumen)\n");
-    printf("  --plazo <seg>          Plazo máximo por solicitud en segundos (por defecto 60)\n");
-    printf("  --lote <archivo>       Archivo con una solicitud por línea (solo con --resumen)\n");
-    printf("  --fuente <auto|proc>   Fuente de observación (por defecto auto)\n");
-    printf("  --mostrar-salida       Muestra stdout/stderr del programa ejecutado\n");
+    printf("  --app <nombre|PID>     Aplicación viva del SO a observar\n");
+    printf("  --unidad <servicio>    Unidad systemd de la aplicación viva\n");
+    printf("  --fin <orden|inact.>   Cierre por orden o inactividad (por defecto inactividad)\n");
+    printf("  --linea-base <seg>     Segundos de calibración previa (0 omite calibración)\n");
+    printf("  --modo <modo>          respuesta | estabilidad | escalado | fallo\n");
+    printf("  --slo-ms <ms>          Umbral máximo esperado en modo respuesta\n");
+    printf("  --entradas <lista>     Lista separada por comas de entradas por solicitud\n");
+    printf("  --tamanos <lista>      Tamaños asociados para modo escalado\n");
+    printf("  --fallo-en <N>         Inyecta fallo en la solicitud N (modo fallo)\n");
+    printf("  --plazo <seg>          Plazo máximo manual por solicitud en segundos\n");
+    printf("  -n <N>                 Número de solicitudes (5 por defecto, con --resumen)\n");
+    printf("  --fuente <auto|proc>   Fuente de observación (auto | ebpf | proc)\n");
+    printf("  --mostrar-salida       Muestra stdout/stderr de la orden ejecutada\n");
     printf("  -h, --help             Muestra esta ayuda y ejemplos\n\n");
     printf("Ejemplos:\n");
-    printf("  %s antigravity\n", prog);
-    printf("  %s --resumen -d 30 antigravity\n", prog);
-    printf("  %s -- sha256sum README.md\n", prog);
-    printf("  %s --resumen -n 5 -- sha256sum README.md\n", prog);
+    printf("  %s --resumen -d 10 --interval 150 antigravity-ide\n", prog);
+    printf("  %s --resumen -d 10 --app antigravity-ide --fin orden --linea-base 0 --modo estabilidad --entradas \"10,10,10,10,10\" -- ./docs/pruebas/tsp_np.py\n", prog);
 }
 
 /* Selección automática de PID raíz con mayor jerarquía de hijos */
@@ -549,24 +555,17 @@ int main(int argc, char *argv[]) {
     int plazo_s = 60;
     int plazo_set = 0;
     int mostrar_salida = 0;
-    const char *lote_path = NULL;
     const char *fuente = "auto";
     int idx_cmd = -1;
     int modo_historial = 0;
     const char *trace_filtro = NULL;
     int ret_dias = 7;
     int ret_seg = 0;
-    const char *backend_addr = NULL;
-    const char *lanzar_backend = NULL;
-    int backend_pid = 0;
-    const char *ruta_http = "/";
     const char *unidad = NULL;
     int linea_base_s = 5;
     const char *app_target = NULL;
-    const char *lanzar_app = NULL;
     int fin_por_orden = 0;
     const char *modo_str = NULL;
-    const char *tiempo_str = NULL;
     double slo_ms = 0.0;
     const char *entradas = NULL;
     const char *tamanos = NULL;
@@ -587,22 +586,12 @@ int main(int argc, char *argv[]) {
             ret_dias = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--retencion-seg") == 0 && i + 1 < argc) {
             ret_seg = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
-            backend_addr = argv[++i];
-        } else if (strcmp(argv[i], "--lanzar-backend") == 0 && i + 1 < argc) {
-            lanzar_backend = argv[++i];
-        } else if (strcmp(argv[i], "--backend-pid") == 0 && i + 1 < argc) {
-            backend_pid = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--ruta") == 0 && i + 1 < argc) {
-            ruta_http = argv[++i];
         } else if (strcmp(argv[i], "--unidad") == 0 && i + 1 < argc) {
             unidad = argv[++i];
         } else if (strcmp(argv[i], "--linea-base") == 0 && i + 1 < argc) {
             linea_base_s = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--app") == 0 && i + 1 < argc) {
             app_target = argv[++i];
-        } else if (strcmp(argv[i], "--lanzar-app") == 0 && i + 1 < argc) {
-            lanzar_app = argv[++i];
         } else if (strcmp(argv[i], "--fin") == 0 && i + 1 < argc) {
             const char *fv = argv[++i];
             if (strcmp(fv, "orden") == 0) fin_por_orden = 1;
@@ -613,8 +602,6 @@ int main(int argc, char *argv[]) {
             }
         } else if (strcmp(argv[i], "--modo") == 0 && i + 1 < argc) {
             modo_str = argv[++i];
-        } else if (strcmp(argv[i], "--tiempo") == 0 && i + 1 < argc) {
-            tiempo_str = argv[++i];
         } else if (strcmp(argv[i], "--slo-ms") == 0 && i + 1 < argc) {
             slo_ms = atof(argv[++i]);
         } else if (strcmp(argv[i], "--entradas") == 0 && i + 1 < argc) {
@@ -636,8 +623,6 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--plazo") == 0 && i + 1 < argc) {
             plazo_s = atoi(argv[++i]);
             plazo_set = 1;
-        } else if (strcmp(argv[i], "--lote") == 0 && i + 1 < argc) {
-            lote_path = argv[++i];
         } else if (strcmp(argv[i], "--fuente") == 0 && i + 1 < argc) {
             fuente = argv[++i];
         } else if (strcmp(argv[i], "--mostrar-salida") == 0) {
@@ -663,11 +648,10 @@ int main(int argc, char *argv[]) {
         return rc;
     }
 
-    int es_backend_dest = (backend_addr != NULL || lanzar_backend != NULL);
-    int es_app_dest = (app_target != NULL || lanzar_app != NULL);
-    int es_solicitud = (idx_cmd >= 0 || lote_path != NULL || es_backend_dest || es_app_dest);
+    int es_app_dest = (app_target != NULL || unidad != NULL);
+    int es_solicitud = (idx_cmd >= 0 || es_app_dest);
     int tiene_opc_sol = (n_sol >= 0 || plazo_set || mostrar_salida ||
-                         strcmp(fuente, "auto") != 0 || modo_str != NULL || tiempo_str != NULL);
+                         strcmp(fuente, "auto") != 0 || modo_str != NULL);
 
     modo_t modo = modo_resumen ? MODO_ESTABILIDAD : MODO_RESPUESTA;
     if (modo_str != NULL) {
@@ -681,25 +665,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    tiempo_nivel_t tnivel = TIEMPO_NORMAL;
-    int factor_t = 1;
-    if (tiempo_str != NULL) {
-        if (plazo_set) {
-            fprintf(stderr, "[tracelite] --tiempo es incompatible con --plazo.\n");
-            return 2;
-        }
-        if (strcmp(tiempo_str, "normal") == 0) { tnivel = TIEMPO_NORMAL; factor_t = 1; }
-        else if (strcmp(tiempo_str, "alto") == 0) { tnivel = TIEMPO_ALTO; factor_t = 3; }
-        else if (strcmp(tiempo_str, "muy-alto") == 0) { tnivel = TIEMPO_MUY_ALTO; factor_t = 6; }
-        else {
-            fprintf(stderr, "[tracelite] --tiempo inválido: %s\n", tiempo_str);
-            return 2;
-        }
-    } else if (plazo_set) {
-        tnivel = TIEMPO_MANUAL;
-    }
+    tiempo_nivel_t tnivel = plazo_set ? TIEMPO_MANUAL : TIEMPO_NORMAL;
 
     if (es_solicitud) {
+        if (!es_app_dest) {
+            fprintf(stderr, "[tracelite] Solo se admiten aplicaciones vivas (--app o --unidad).\n");
+            return 2;
+        }
         if (!modo_resumen && (modo == MODO_ESCALADO || modo == MODO_FALLO)) {
             fprintf(stderr, "[tracelite] --modo escalado y --modo fallo exigen --resumen.\n");
             return 2;
@@ -708,39 +680,19 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "[tracelite] Las opciones de solicitud no se combinan con PID o nombre.\n");
             return 2;
         }
-        if (es_backend_dest && (idx_cmd >= 0 || es_app_dest)) {
-            fprintf(stderr, "[tracelite] Solo un destino por ejecución (no combines --backend con -- o --app).\n");
+        if (idx_cmd < 0) {
+            fprintf(stderr, "[tracelite] Destino --app/--unidad requiere -- <orden>.\n");
             return 2;
         }
-        if (es_app_dest && idx_cmd < 0) {
-            fprintf(stderr, "[tracelite] Destino --app/--lanzar-app requiere -- <orden>.\n");
-            return 2;
-        }
-        if (app_target != NULL && lanzar_app != NULL) {
-            fprintf(stderr, "[tracelite] No combines --app con --lanzar-app.\n");
-            return 2;
-        }
-        if (backend_addr != NULL && lanzar_backend != NULL) {
-            fprintf(stderr, "[tracelite] No combines --backend con --lanzar-backend.\n");
-            return 2;
-        }
-        if ((duracion_seg >= 0 && !es_app_dest) || interval_set) {
-            fprintf(stderr, "[tracelite] -d (sin --app) e --interval solo aplican en modo observación.\n");
-            return 2;
-        }
-        if (lote_path != NULL && !modo_resumen) {
-            fprintf(stderr, "[tracelite] --lote exige --resumen.\n");
-            return 2;
-        }
-        if (lote_path != NULL && idx_cmd >= 0) {
-            fprintf(stderr, "[tracelite] --lote no se combina con -- <comando>.\n");
+        if (interval_set) {
+            fprintf(stderr, "[tracelite] --interval solo aplica en modo observación.\n");
             return 2;
         }
         if (n_sol >= 0 && !modo_resumen) {
             fprintf(stderr, "[tracelite] -n solo aplica con --resumen.\n");
             return 2;
         }
-        if (idx_cmd >= 0 && idx_cmd >= argc) {
+        if (idx_cmd >= argc) {
             fprintf(stderr, "[tracelite] Falta el comando después de --.\n");
             return 2;
         }
@@ -754,7 +706,7 @@ int main(int argc, char *argv[]) {
             return 2;
         }
     } else if (tiene_opc_sol) {
-        fprintf(stderr, "[tracelite] Opciones de solicitud requieren -- <comando> o --lote.\n");
+        fprintf(stderr, "[tracelite] Opciones de solicitud requieren --app <nombre|PID> -- <orden>.\n");
         return 2;
     }
 
@@ -789,29 +741,24 @@ int main(int argc, char *argv[]) {
         if (plazo_set) {
             cfg.plazo_s = plazo_s;
         } else if (modo == MODO_ESCALADO) {
-            cfg.plazo_s = 30 * factor_t;
+            cfg.plazo_s = 30;
         } else if (modo == MODO_ESTABILIDAD) {
-            cfg.plazo_s = 60 * factor_t;
+            cfg.plazo_s = 60;
         } else {
-            cfg.plazo_s = 10 * factor_t;
+            cfg.plazo_s = 10;
         }
         if (!plazo_set && cfg.ventana_seg > 0 && cfg.plazo_s < cfg.ventana_seg + 2) {
             cfg.plazo_s = cfg.ventana_seg + 2;
         }
         cfg.mostrar_salida = mostrar_salida;
-        cfg.lote_path = lote_path;
         cfg.cmd_linea = cmd_linea;
         cfg.fuente = fuente;
         cfg.ret_dias = ret_dias;
         cfg.ret_seg = ret_seg;
-        cfg.destino = es_backend_dest ? DEST_BACKEND : (es_app_dest ? DEST_APP : DEST_PROGRAMA);
-        cfg.lanzar_backend = lanzar_backend;
-        cfg.backend_pid = backend_pid;
-        cfg.ruta_http = ruta_http;
+        cfg.destino = DEST_APP;
         cfg.unidad = unidad;
         cfg.linea_base_s = (linea_base_s >= 0) ? linea_base_s : 5;
         cfg.app_target = app_target;
-        cfg.lanzar_app = lanzar_app;
         cfg.fin_por_orden = fin_por_orden;
         cfg.modo = modo;
         cfg.tiempo_nivel = tnivel;
@@ -819,29 +766,6 @@ int main(int argc, char *argv[]) {
         cfg.entradas = entradas;
         cfg.tamanos = tamanos;
         cfg.fallo_en = fallo_en;
-
-        char bhost[64] = "127.0.0.1";
-        int bpuerto = 8000;
-        if (backend_addr != NULL) {
-            const char *colon = strchr(backend_addr, ':');
-            if (colon != NULL) {
-                size_t hl = (size_t)(colon - backend_addr);
-                if (hl > 0 && hl < sizeof(bhost)) {
-                    memcpy(bhost, backend_addr, hl);
-                    bhost[hl] = '\0';
-                }
-                bpuerto = atoi(colon + 1);
-            } else {
-                snprintf(bhost, sizeof(bhost), "%s", backend_addr);
-            }
-        } else if (lanzar_backend != NULL) {
-            const char *sp = strrchr(lanzar_backend, ' ');
-            if (sp != NULL && atoi(sp + 1) > 0) {
-                bpuerto = atoi(sp + 1);
-            }
-        }
-        cfg.backend_host = bhost;
-        cfg.backend_puerto = bpuerto;
 
         int rc = ejecutar_solicitudes(&cfg, dir_priv, sock_path, &detener_captura);
         rmdir(dir_priv);

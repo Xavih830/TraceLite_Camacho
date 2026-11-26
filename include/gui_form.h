@@ -3,19 +3,13 @@
 
 #include <stddef.h>
 
-/* Formas, destinos, modos y tipos de campo del formulario G2 */
+/* Formas, modos y tipos de campo del formulario para aplicaciones vivas */
 
 typedef enum {
     FORMA_OBSERVACION = 0,
     FORMA_INSTANTANEA = 1,
     FORMA_RESUMEN     = 2
 } gui_forma_t;
-
-typedef enum {
-    DEST_PROGRAMA = 0,
-    DEST_BACKEND  = 1,
-    DEST_APP      = 2
-} gui_destino_t;
 
 typedef enum {
     MODO_FORM_RESPUESTA   = 0,
@@ -36,24 +30,13 @@ typedef enum {
     C_OBS_DURANTE,
     C_OBS_DURACION,
     C_OBS_INTERVAL,
-    C_DESTINO,
-    C_MODO,
-    C_PLAZO_S,
-    C_PROG_BIN,
-    C_PROG_ARG1,
-    C_PROG_ARG2,
-    C_PROG_ARG3,
-    C_BK_MODO,
-    C_BK_ADDR,
-    C_BK_UNIDAD,
-    C_BK_CMD,
-    C_BK_RUTA,
-    C_APP_MODO,
     C_APP_TARGET,
     C_APP_UNIDAD,
-    C_APP_CMD,
     C_APP_ORDEN,
     C_APP_FIN,
+    C_APP_LINEA_BASE,
+    C_MODO,
+    C_PLAZO_S,
     C_OPT_SLO_MS,
     C_OPT_ENTRADAS,
     C_OPT_TAMANOS,
@@ -63,43 +46,32 @@ typedef enum {
 
 typedef struct {
     gui_forma_t   forma;
-    gui_destino_t destino;
     gui_modo_t    modo;
-    int           plazo_s;     /* 0=por defecto, >0=--plazo */
-    int           obs_durante; /* 0=no, 1=si (--resumen) */
-    int           obs_duracion_s;
-    int           obs_interval_ms;
-    int           bk_nuevo;    /* 0=vivo, 1=nuevo */
-    int           app_nueva;   /* 0=viva, 1=nueva */
-    int           app_fin;     /* 0=ninguno, 1=error, 2=senal */
+    int           plazo_s;        /* 0=por defecto, >0=--plazo */
+    int           obs_durante;    /* 0=no, 1=si (--resumen) */
+    int           obs_duracion_s; /* -d */
+    int           obs_interval_ms;/* --interval */
+    int           app_fin;        /* 0=inactividad, 1=orden */
+    int           linea_base_s;   /* --linea-base */
     int           slo_ms;
     int           fallo_en;
     char          obs_objetivo[128];
-    char          prog_bin[256];
-    char          prog_arg1[256];
-    char          prog_arg2[256];
-    char          prog_arg3[256];
-    char          bk_addr[128];
-    char          bk_unidad[128];
-    char          bk_cmd[256];
-    char          bk_ruta[128];
     char          app_target[128];
     char          app_unidad[128];
-    char          app_cmd[256];
-    char          app_orden[128];
+    char          app_orden[256];
     char          entradas[64];
     char          tamanos[64];
 } gui_form_valores_t;
 
 typedef struct {
-    gui_campo_id_t    id;
-    const char       *opcion;
-    const char       *etiqueta;
-    gui_campo_tipo_t  tipo;
-    int               min_val;
-    int               max_val;
-    int               def_val;
-    const char       *def_str;
+    gui_campo_id_t     id;
+    const char        *opcion;
+    const char        *etiqueta;
+    gui_campo_tipo_t   tipo;
+    int                min_val;
+    int                max_val;
+    int                def_val;
+    const char        *def_str;
     const char *const *opciones;
     int (*aplica)(const gui_form_valores_t *v);
 } campo_form_t;
