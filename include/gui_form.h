@@ -36,6 +36,7 @@ typedef enum {
     C_APP_FIN,
     C_APP_LINEA_BASE,
     C_MODO,
+    C_N_SOL,
     C_PLAZO_S,
     C_OPT_SLO_MS,
     C_OPT_ENTRADAS,
@@ -47,6 +48,7 @@ typedef enum {
 typedef struct {
     gui_forma_t   forma;
     gui_modo_t    modo;
+    int           n_sol;          /* -n en Resumen (1..64) */
     int           plazo_s;        /* 0=por defecto, >0=--plazo */
     int           obs_durante;    /* 0=no, 1=si (--resumen) */
     int           obs_duracion_s; /* -d */

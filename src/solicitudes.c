@@ -739,8 +739,11 @@ int ejecutar_solicitudes(const solicitudes_cfg_t *cfg,
     }
 
     int total_sol = (cfg->lote_path != NULL) ? n_lote : cfg->n_solicitudes;
-    if (n_entradas > 0 && cfg->lote_path == NULL && total_sol > n_entradas) {
+    if (cfg->lote_path == NULL && !cfg->n_sol_fijado && n_entradas > 0) {
         total_sol = n_entradas;
+    }
+    if (total_sol > 64) {
+        total_sol = 64;
     }
     int completadas = 0;
     int total_alertas = 0;
@@ -757,7 +760,7 @@ int ejecutar_solicitudes(const solicitudes_cfg_t *cfg,
         if (cfg->lote_path != NULL) {
             snprintf(sol.linea, sizeof(sol.linea), "%s", lineas_lote[i - 1]);
         } else {
-            const char *ent = (i - 1 < n_entradas) ? entradas_arr[i - 1] : NULL;
+            const char *ent = (n_entradas > 0) ? entradas_arr[(i - 1) % n_entradas] : NULL;
             construir_linea_solicitud(cfg, i, ent, sol.linea, sizeof(sol.linea));
         }
 

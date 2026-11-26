@@ -31,7 +31,8 @@ Este documento reúne los comandos de prueba centrados en **`antigravity-ide`** 
 | `--modo <modo>` | Criterio de evaluación: `respuesta` (latencia/SLO), `estabilidad` ($\mu + 2\sigma$), `escalado` (`dur/tamano`) o `fallo` (inyección controlada de error). |
 | `--slo-ms <ms>` | Límite máximo esperado en milisegundos para `modo=respuesta`; si se supera, emite alerta `slo_excedido`. |
 | `--plazo <seg>` | Timeout manual máximo por solicitud en segundos (reemplaza en la GUI a los antiguos presets de tiempo). |
-| `--entradas "<e1,e2,...>"` | Lista separada por comas de entradas; determina cuántas solicitudes se lanzan (ej. 5 valores = 5 solicitudes). |
+| `-n <N>` | Cantidad maleable de solicitudes por lote (`1..64`, por defecto `5` con `--resumen`). Si se pasan menos valores en `--entradas`, los repite cíclicamente hasta completar `N`; en `--historial` y en la GUI cada ejecución queda agrupada como `Lote 1 (N solicitudes)`, `Lote 2 (...)`. |
+| `--entradas "<e1,e2,...>"` | Lista separada por comas de entradas; si no se indica `-n`, determina cuántas solicitudes se lanzan. |
 | `--tamanos "<t1,t2,...>"` | Pesos o tamaños relativos asociados a cada entrada en `--modo escalado` para detectar crecimiento no lineal (`escalado_no_lineal`). |
 | `--fallo-en <N>` | En `--modo fallo`, fuerza un fallo en la solicitud número `N` (`ERROR [error_proceso]`) para validar resiliencia sin afectar las demás ni a la app viva. |
 | `-- <comando>` | Separa las opciones de TraceLite de la orden real que ejecuta `servicio_a` (por ejemplo `./docs/pruebas/tsp_np.py` o `sleep`). |

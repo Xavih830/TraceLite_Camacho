@@ -20,6 +20,7 @@ static int es_duracion_ventana(const gui_form_valores_t *v) {
     return (v->forma != FORMA_OBSERVACION) || (v->obs_durante != 0);
 }
 static int no_es_obs(const gui_form_valores_t *v) { return v->forma != FORMA_OBSERVACION; }
+static int es_resumen(const gui_form_valores_t *v) { return v->forma == FORMA_RESUMEN; }
 static int es_slo(const gui_form_valores_t *v) {
     return v->forma != FORMA_OBSERVACION &&
            (v->modo == MODO_FORM_RESPUESTA || v->modo == MODO_FORM_ESTABILIDAD);
@@ -48,6 +49,7 @@ static const campo_form_t TABLA_CAMPOS[] = {
     { C_APP_FIN,        "--fin",         "Fin",               CAMPO_DROPDOWN, 0,     1,   1, NULL,              OPS_FIN,   no_es_obs },
     { C_APP_LINEA_BASE, "--linea-base",  "Línea base (s)",    CAMPO_SPIN,     0,    60,   0, NULL,              NULL,      no_es_obs },
     { C_MODO,           "--modo",        "Modo",              CAMPO_DROPDOWN, 0,     3,   0, NULL,              OPS_MODO,  no_es_obs },
+    { C_N_SOL,          "-n",            "Solicitudes (-n)",  CAMPO_SPIN,     1,    64,   5, NULL,              NULL,      es_resumen },
     { C_PLAZO_S,        "--plazo",       "Plazo máx (s)",     CAMPO_SPIN,     0,  3600,   0, NULL,              NULL,      no_es_obs },
     { C_OPT_SLO_MS,     "--slo-ms",      "SLO (ms)",          CAMPO_SPIN,     0,600000,   0, NULL,              NULL,      es_slo },
     { C_OPT_ENTRADAS,   "--entradas",    "Entradas",          CAMPO_ENTRY,    0,     0,   0, "",                NULL,      es_entradas },
@@ -66,6 +68,7 @@ void gui_form_valores_defecto(gui_form_valores_t *v) {
     memset(v, 0, sizeof(*v));
     v->forma           = FORMA_INSTANTANEA;
     v->modo            = MODO_FORM_RESPUESTA;
+    v->n_sol           = 5;
     v->plazo_s         = 0;
     v->obs_durante     = 1;
     v->obs_duracion_s  = 10;
@@ -128,6 +131,10 @@ int gui_form_construir_argv(const gui_form_valores_t *v, const char *ruta_tracel
 
     if (v->forma == FORMA_RESUMEN) {
         if (push_arg(&argv, &argc, &cap, "--resumen") < 0) goto err;
+        if (v->n_sol > 0) {
+            if (push_arg(&argv, &argc, &cap, "-n") < 0) goto err;
+            if (push_num(&argv, &argc, &cap, v->n_sol) < 0) goto err;
+        }
     }
     if (v->obs_duracion_s > 0) {
         if (push_arg(&argv, &argc, &cap, "-d") < 0) goto err;

@@ -28,6 +28,7 @@ typedef enum {
 typedef struct {
     int            resumen;
     int            n_solicitudes;
+    int            n_sol_fijado;
     int            plazo_s;
     int            ventana_seg;
     int            mostrar_salida;

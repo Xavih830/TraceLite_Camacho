@@ -737,6 +737,7 @@ int main(int argc, char *argv[]) {
         memset(&cfg, 0, sizeof(cfg));
         cfg.resumen = modo_resumen;
         cfg.n_solicitudes = (n_sol > 0) ? n_sol : (modo_resumen ? 5 : 1);
+        cfg.n_sol_fijado = (n_sol > 0) ? 1 : 0;
         cfg.ventana_seg = (duracion_seg > 0) ? duracion_seg : 0;
         if (plazo_set) {
             cfg.plazo_s = plazo_s;

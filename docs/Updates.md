@@ -476,3 +476,13 @@ Para detectar incrementos aleatorios o picos anómalos en el tiempo de ejecució
 - Se simplificó el formulario de `tracelite-gui` (`include/gui_form.h`, `src/gui_form.c`, `src/gui.c`) para exponer únicamente **Observación** y solicitudes sobre **app viva** (`--app` / `--unidad`), manteniendo la configuración manual de `-d` (`Duración (s)`) y `--plazo` (`Plazo máx (s)`).
 - Se eliminaron los scripts obsoletos de backend y pruebas aisladas (`tests/test_backend.sh`, `tests/test_solicitudes.sh`, `docs/pruebas/backend_demo.py`, `docs/pruebas/caso_normal.sh`, `docs/pruebas/caso_anomalo.sh`, `docs/pruebas/matriz_modos.sh`, `docs/pruebas/preparar_datos.sh`, `docs/pruebas/comparar_fuentes.sh`), dejando `make check` conectado a `docs/pruebas/pruebas_vivos.sh`.
 - Se verificó compilación sin advertencias (`make && make gui`), `make check` superado (`test_span`, `test_almacen`, `pruebas_vivos.sh`) y arranque limpio de `bin/tracelite-gui`.
+
+
+---
+
+## [2026-11-25] Lotes maleables (`-n`) y agrupación por lote en `--historial` y GUI
+
+### Qué se implementó
+- Se habilitó `-n <N>` (`1..64`) como tamaño de lote maleable tanto en CLI (`include/solicitudes.h`, `src/tracelite.c`, `src/solicitudes.c`) como en el formulario de `tracelite-gui` (`Solicitudes (-n)` en `include/gui_form.h`, `src/gui_form.c`, `src/gui.c`), repitiendo cíclicamente `--entradas` si se especifican menos elementos que `N`.
+- Se agregó agrupación automática por lote en `--historial` (`src/almacen.c`, mostrando `=== Lote <k> (<m> solicitudes) ===`) y en la lista/detalle de `src/gui.c` (`Lote #<k>`).
+- Se actualizó `docs/GUIA_PRUEBAS_ANTIGRAVITY.md` y se verificó `make && make gui`, `make check` y agrupación en lotes (`-n 3` + `-n 2`).

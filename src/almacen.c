@@ -436,8 +436,46 @@ int almacen_mostrar_historial(const almacen_indice_t *idx, const char *trace_id_
         return 1;
     }
 
-    int num_trazas = imprimir_trazas_spans(lista, count);
-    imprimir_resumen_spans(lista, count, num_trazas);
+    if (trace_id_filtro != NULL) {
+        int num_trazas = imprimir_trazas_spans(lista, count);
+        imprimir_resumen_spans(lista, count, num_trazas);
+        free(lista);
+        return 0;
+    }
+
+    int lote_num = 0;
+    int pos = 0;
+    int total_trazas = 0;
+    while (pos < idx->n) {
+        int ini_lote = pos;
+        int prev_sol = idx->regs[pos].meta.solicitud;
+        int n_trazas_lote = 0;
+        char ult_tid[33] = "";
+
+        while (pos < idx->n) {
+            const char *tid = idx->regs[pos].span.trace_id;
+            int sol = idx->regs[pos].meta.solicitud;
+            int es_nueva_traza = (strcmp(tid, ult_tid) != 0);
+            if (pos > ini_lote && es_nueva_traza && (sol <= 1 || sol <= prev_sol)) {
+                break;
+            }
+            if (es_nueva_traza) {
+                snprintf(ult_tid, sizeof(ult_tid), "%s", tid);
+                n_trazas_lote++;
+                prev_sol = sol;
+            }
+            pos++;
+        }
+
+        int n_lote = pos - ini_lote;
+        lote_num++;
+        printf("\n=== Lote %d (%d %s) ===\n", lote_num, n_trazas_lote,
+               (n_trazas_lote == 1) ? "solicitud" : "solicitudes");
+        int nt = imprimir_trazas_spans(&lista[ini_lote], n_lote);
+        total_trazas += nt;
+    }
+
+    imprimir_resumen_spans(lista, count, total_trazas);
     free(lista);
     return 0;
 }

@@ -21,6 +21,7 @@ typedef struct {
     char    operacion[48];
     char    tipo[16];
     double  dur_ms;
+    int     lote;
     int     solicitud;
     int     tiene_error;
     int     tiene_alerta;
@@ -100,6 +101,9 @@ static void construir_indice_trazas(visor_app_t *app) {
     app->trazas = (traza_resumen_t *)calloc((size_t)app->alm.n, sizeof(traza_resumen_t));
     if (app->trazas == NULL) return;
 
+    int lote_actual = 0;
+    int prev_sol = 0;
+
     for (int i = 0; i < app->alm.n; i++) {
         const almacen_registro_t *r = &app->alm.regs[i];
         int idx = -1;
@@ -112,6 +116,11 @@ static void construir_indice_trazas(visor_app_t *app) {
         if (idx < 0) {
             idx = app->n_trazas++;
             traza_resumen_t *tr = &app->trazas[idx];
+            if (lote_actual == 0 || r->meta.solicitud <= 1 || r->meta.solicitud <= prev_sol) {
+                lote_actual++;
+            }
+            prev_sol = r->meta.solicitud;
+            tr->lote = lote_actual;
             snprintf(tr->trace_id, sizeof(tr->trace_id), "%s", r->span.trace_id);
             snprintf(tr->modo, sizeof(tr->modo), "%s", r->meta.modo[0] ? r->meta.modo : "-");
             snprintf(tr->destino, sizeof(tr->destino), "%s", r->meta.destino[0] ? r->meta.destino : "-");
@@ -151,6 +160,9 @@ static void actualizar_detalle(visor_app_t *app) {
 
     const traza_resumen_t *tr = &app->trazas[app->sel_traza];
     GString *gs = g_string_new("");
+    if (tr->lote > 0) {
+        g_string_append_printf(gs, "Lote #%d | ", tr->lote);
+    }
     if (tr->solicitud > 0) {
         g_string_append_printf(gs, "Solicitud #%d | ", tr->solicitud);
     }
@@ -356,10 +368,10 @@ static void poblar_listas(visor_app_t *app) {
             }
         }
 
-        char txt[192];
+        char txt[224];
         const char *est = tr->tiene_error ? "ERROR" : (tr->tiene_alerta ? "ANOMALIA" : "OK");
-        snprintf(txt, sizeof(txt), "%s | %s | %s | %s | %.2f ms | %s%s%s",
-                 tr->hora, tr->modo, tr->destino, tr->operacion, tr->dur_ms, est,
+        snprintf(txt, sizeof(txt), "Lote %d | %s | %s | %s | %.2f ms | %s%s%s",
+                 tr->lote, tr->hora, tr->modo, tr->operacion, tr->dur_ms, est,
                  tr->tiene_alerta ? " [" : "", tr->tiene_alerta ? tr->anomalia : "");
         if (tr->tiene_alerta) strncat(txt, "]", sizeof(txt) - strlen(txt) - 1);
 
@@ -428,6 +440,7 @@ static void leer_valores_form(const visor_app_t *app, gui_form_valores_t *v) {
     v->app_fin   = (int)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_APP_FIN]));
     v->linea_base_s = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->w_campos[C_APP_LINEA_BASE]));
     v->modo      = (gui_modo_t)gtk_drop_down_get_selected(GTK_DROP_DOWN(app->w_campos[C_MODO]));
+    v->n_sol     = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->w_campos[C_N_SOL]));
     v->plazo_s   = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->w_campos[C_PLAZO_S]));
     v->slo_ms    = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->w_campos[C_OPT_SLO_MS]));
     v->fallo_en  = gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(app->w_campos[C_OPT_FALLO_EN]));
